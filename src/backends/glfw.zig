@@ -585,6 +585,9 @@ pub fn main() !void {
             if (config.vsync) zglfw.swapInterval(1) else zglfw.swapInterval(0);
             break :blk try dvui.render_backend.init(gpa, zglfw.getProcAddress, "330");
         },
+        .vulkan => @compileError(
+            "Vulkan requires a custom main loop — use examples/glfw-vulkan-ontop.zig as your entry point",
+        ),
         else => @compileError("unsupported renderer for backend"),
     };
 

@@ -12,6 +12,7 @@ pub const Backend = enum {
     raylib,
     raylib_zig,
     dx11,
+    vulkan,
     glfw,
     web,
     wio,
@@ -22,4 +23,5 @@ pub const Backend = enum {
 pub const RenderBackend = enum {
     default,
     opengl,
+    vulkan,
 };

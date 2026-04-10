@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"C:/Users/Justin/AppData/Roaming/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-windows-0.15.2/zig.exe\" build:*)"
+    ]
+  }
+}

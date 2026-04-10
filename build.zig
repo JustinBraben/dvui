@@ -643,6 +643,51 @@ pub fn buildBackend(backend: Backend, test_dvui_and_app: bool, dvui_opts_in: Dvu
                 _ = addExample("dx11-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
             }
         },
+        .vulkan => {
+            dvui_opts.setDefaults(.{ .libc = true, .freetype = true, .stb_image = true, .tiny_file_dialogs = true, .tree_sitter = true });
+
+            if (dvui_opts.render_backend == .default) {
+                dvui_opts.render_backend = .vulkan;
+            }
+
+            const glfw_mod = b.addModule("glfw", .{
+                .root_source_file = b.path("src/backends/glfw.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+
+            const maybe_glfw = b.lazyDependency("zglfw", .{ .target = target, .optimize = optimize });
+            if (maybe_glfw) |glfw| {
+                glfw_mod.addImport("zglfw", glfw.module("root"));
+                glfw_mod.linkLibrary(glfw.artifact("glfw"));
+            }
+
+            // Declare options once here; store results in dvui_opts so addDvuiModule
+            // can reuse them without re-declaring the same option name.
+            // Declare each build option exactly once; store in dvui_opts for use in addDvuiModule.
+            dvui_opts.vk_registry = resolveVkRegistry(b, b.option([]const u8, "vk_registry", "Path to vk.xml Vulkan registry"));
+            dvui_opts.glslc_path = resolveGlslc(b, b.option([]const u8, "glslc", "Path to glslc shader compiler"));
+            const vk_registry = dvui_opts.vk_registry.?;
+
+            const dvui_glfw = addDvuiModule("dvui-glfw", dvui_opts);
+            linkBackend(dvui_glfw, glfw_mod);
+
+            const example_opts: ExampleOptions = .{
+                .dvui_mod = dvui_glfw,
+                .backend_name = "glfw-backend",
+                .backend_mod = glfw_mod,
+            };
+            const glfw_vulkan_ontop = addExample("glfw-vulkan-ontop", b.path("examples/glfw-vulkan-ontop.zig"), test_dvui_and_app, example_opts, dvui_opts);
+
+            // Add vulkan-zig and vk_kickstart to the example for app-side device setup.
+            if (b.lazyDependency("vulkan", .{ .registry = vk_registry })) |vkzig| {
+                glfw_vulkan_ontop.addImport("vulkan", vkzig.module("vulkan-zig"));
+            }
+            if (b.lazyDependency("vk_kickstart", .{ .registry = vk_registry, .verbose = false })) |vkk| {
+                glfw_vulkan_ontop.addImport("vk_kickstart", vkk.module("vk-kickstart"));
+            }
+        },
         .glfw => {
             dvui_opts.setDefaults(.{ .libc = true, .freetype = true, .stb_image = true, .tiny_file_dialogs = true, .tree_sitter = true });
 
@@ -838,6 +883,8 @@ const DvuiModuleOptions = struct {
     accesskit: AccesskitOptions = .off,
     build_options: *std.Build.Step.Options,
     render_backend: RenderBackend,
+    vk_registry: ?std.Build.LazyPath = null,
+    glslc_path: ?[]const u8 = null,
     vertex_index: VertexIndex,
     libc: ?bool,
     tiny_file_dialogs: ?bool,
@@ -988,6 +1035,35 @@ pub fn addDvuiModule(
                 .profile = .core,
             })) |opengl| {
                 renderer_mod.addImport("gl", opengl.module("opengl"));
+            }
+        },
+        .vulkan => {
+            renderer_mod.root_source_file = b.path("src/backends/render/vulkan.zig");
+
+            // vk_registry was resolved once in buildBackend and stored in opts.
+            const vk_registry = opts.vk_registry orelse @panic("vk_registry not set before addDvuiModule for vulkan renderer");
+            if (b.lazyDependency("vulkan", .{ .registry = vk_registry })) |vkzig| {
+                renderer_mod.addImport("vk", vkzig.module("vulkan-zig"));
+            }
+
+            // Compile GLSL shaders to SPIR-V via glslc and embed them as anonymous modules.
+            // glslc path was resolved once in buildBackend and stored in opts.
+            const glslc_path = opts.glslc_path orelse @panic("glslc_path not set before addDvuiModule for vulkan renderer");
+            inline for (.{
+                .{ "src/backends/render/dvui.vert", "dvui.vert.spv", "vert_spv" },
+                .{ "src/backends/render/dvui.frag", "dvui.frag.spv", "frag_spv" },
+            }) |shader| {
+                const compile = b.addSystemCommand(&.{glslc_path});
+                compile.addFileArg(b.path(shader[0]));
+                compile.addArg("-o");
+                const spv = compile.addOutputFileArg(shader[1]);
+
+                // Wrap the binary .spv in a tiny Zig file so addAnonymousImport can embed it.
+                const wf = b.addWriteFiles();
+                _ = wf.addCopyFile(spv, shader[1]);
+                const zig_wrapper = wf.add(shader[2] ++ ".zig",
+                    "pub const data align(4) = @embedFile(\"" ++ shader[1] ++ "\");\n");
+                renderer_mod.addAnonymousImport(shader[2], .{ .root_source_file = zig_wrapper });
             }
         },
     }
@@ -1283,4 +1359,34 @@ pub fn svgPathToTvgPath(b: *std.Build, svg_path: std.Build.LazyPath) std.Build.L
     run_svg2tvg_step.addArg("-o");
     const tvg_bytes = run_svg2tvg_step.addOutputFileArg("out.tvg");
     return tvg_bytes;
+}
+
+/// Resolves the Vulkan registry vk.xml path for vulkan-zig code generation.
+/// Priority: override arg > $VULKAN_SDK/share/vulkan/registry/vk.xml > vulkan_headers dep.
+/// Call b.option("vk_registry", ...) exactly once at the call site and pass the result here.
+fn resolveVkRegistry(b: *std.Build, override: ?[]const u8) std.Build.LazyPath {
+    if (override) |p| return .{ .cwd_relative = p };
+    const env = std.process.getEnvMap(b.allocator) catch @panic("OOM");
+    if (env.get("VULKAN_SDK")) |sdk|
+        return .{ .cwd_relative = b.pathJoin(&.{ sdk, "share", "vulkan", "registry", "vk.xml" }) };
+    // Fallback: download via the vulkan_headers lazy dependency.
+    if (b.lazyDependency("vulkan_headers", .{})) |h|
+        return h.path("registry/vk.xml");
+    // lazyDependency returns null on the first pass; build will retry once fetched.
+    return .{ .cwd_relative = "vk.xml" };
+}
+
+/// Resolves the glslc executable path.
+/// Priority: override arg > $VULKAN_SDK/Bin[/bin]/glslc[.exe] > "glslc" in PATH.
+/// Call b.option("glslc", ...) exactly once at the call site and pass the result here.
+fn resolveGlslc(b: *std.Build, override: ?[]const u8) []const u8 {
+    if (override) |p| return p;
+    const env = std.process.getEnvMap(b.allocator) catch @panic("OOM");
+    if (env.get("VULKAN_SDK")) |sdk| {
+        const is_windows = b.graph.host.result.os.tag == .windows;
+        const bin_dir = if (is_windows) "Bin" else "bin";
+        const exe_name = if (is_windows) "glslc.exe" else "glslc";
+        return b.pathJoin(&.{ sdk, bin_dir, exe_name });
+    }
+    return "glslc";
 }
