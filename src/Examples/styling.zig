@@ -8,6 +8,28 @@ pub fn styling() void {
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer hbox.deinit();
 
+        const start = dvui.dataGetPtrDefault(null, hbox.data().id, "start", f32, 5);
+        const end = dvui.dataGetPtrDefault(null, hbox.data().id, "end", f32, 7);
+
+        const txt = "Highlighted Label";
+        dvui.labelEx(@src(), txt, .{}, .{ .sel_start = @trunc(@min(start.*, end.*)), .sel_end = @trunc(@max(start.*, end.*)) }, .{});
+
+        _ = dvui.sliderEntry(@src(), "start: {d:0.0}", .{ .value = start, .min = 0, .max = txt.len, .interval = 1 }, .{});
+        _ = dvui.sliderEntry(@src(), "end: {d:0.0}", .{ .value = end, .min = 0, .max = txt.len, .interval = 1 }, .{});
+    }
+
+    {
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
+
+            dvui.label(@src(), "Styling Buttons", .{}, .{});
+            _ = dvui.sliderEntry(@src(), "hover fade: {d:0.2}", .{ .value = &dvui.hover_fade_secs, .min = 0, .max = 1.0, .interval = 0.01 }, .{ .min_size_content = .width(200) });
+        }
+
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer hbox.deinit();
+
         _ = dvui.button(@src(), "Highlight", .{}, .{ .style = .highlight });
         _ = dvui.button(@src(), "Error", .{}, .{ .style = .err });
         _ = dvui.button(@src(), "Window", .{}, .{ .style = .window });
@@ -27,6 +49,33 @@ pub fn styling() void {
             .color_border = .yellow,
             .border = .all(1),
         });
+    }
+
+    {
+        dvui.label(@src(), "Other Hover States", .{}, .{});
+
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer hbox.deinit();
+
+        const checked = dvui.dataGetPtrDefault(null, hbox.data().id, "checked", bool, false);
+        const choice = dvui.dataGetPtrDefault(null, hbox.data().id, "choice", usize, 0);
+        const fraction = dvui.dataGetPtrDefault(null, hbox.data().id, "fraction", f32, 0.5);
+        const value = dvui.dataGetPtrDefault(null, hbox.data().id, "value", f32, 0.5);
+
+        var controls = dvui.box(@src(), .{}, .{ .min_size_content = .width(220) });
+        defer controls.deinit();
+
+        _ = dvui.checkbox(@src(), checked, "Checkbox", .{});
+        if (dvui.radio(@src(), choice.* == 0, "Radio One", .{})) choice.* = 0;
+        if (dvui.radio(@src(), choice.* == 1, "Radio Two", .{})) choice.* = 1;
+        _ = dvui.slider(@src(), .{ .fraction = fraction }, .{ .expand = .horizontal });
+        _ = dvui.sliderEntry(@src(), "value: {d:0.2}", .{ .value = value, .min = 0, .max = 1, .interval = 0.01 }, .{});
+
+        var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .show }, .{ .min_size_content = .{ .w = 180, .h = 100 }, .max_size_content = .{ .w = 180, .h = 100 }, .style = .content, .color_text = dvui.themeGet().focus });
+        defer scroll.deinit();
+        for (0..12) |i| {
+            dvui.label(@src(), "Scroll item {d}", .{i}, .{ .id_extra = i });
+        }
     }
 
     {
@@ -54,18 +103,67 @@ pub fn styling() void {
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .gravity_y = 0.5 });
     }
 
-    dvui.label(@src(), "corner radius", .{}, .{});
     {
-        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
-        defer hbox.deinit();
+        var left_alignment = dvui.Alignment.init(@src(), 0);
+        defer left_alignment.deinit();
 
-        const opts: Options = .{ .border = Rect.all(1), .background = true, .min_size_content = .{ .w = 20 } };
+        dvui.label(@src(), "Corner Styles", .{}, .{});
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
 
-        _ = dvui.button(@src(), "0", .{}, opts.override(.{ .corner_radius = Rect.all(0) }));
-        _ = dvui.button(@src(), "2", .{}, opts.override(.{ .corner_radius = Rect.all(2) }));
-        _ = dvui.button(@src(), "7", .{}, opts.override(.{ .corner_radius = Rect.all(7) }));
-        _ = dvui.button(@src(), "100", .{}, opts.override(.{ .corner_radius = Rect.all(100) }));
-        _ = dvui.button(@src(), "mixed", .{}, opts.override(.{ .corner_radius = .rect(0, 2, 7, 100) }));
+            dvui.label(@src(), "Theme: ", .{}, .{});
+            left_alignment.spacer(@src(), 0);
+
+            const opts: Options = .{ .border = Rect.all(1), .background = true, .min_size_content = .{ .w = 20 } };
+            _ = dvui.button(@src(), "0", .{}, opts.override(.{ .corners = .all(0) }));
+            _ = dvui.button(@src(), "2", .{}, opts.override(.{ .corners = .all(2) }));
+            _ = dvui.button(@src(), "7", .{}, opts.override(.{ .corners = .all(7) }));
+            _ = dvui.button(@src(), "100", .{}, opts.override(.{ .corners = .all(100) }));
+            _ = dvui.button(@src(), "mixed", .{}, opts.override(.{ .corners = .{ .tr = .theme(2), .br = .theme(7), .bl = .theme(100) } }));
+        }
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
+
+            dvui.label(@src(), "Square: ", .{}, .{});
+            left_alignment.spacer(@src(), 0);
+
+            const opts: Options = .{ .border = Rect.all(1), .background = true, .min_size_content = .{ .w = 20 } };
+            _ = dvui.button(@src(), "0", .{}, opts.override(.{ .corners = .square }));
+            _ = dvui.button(@src(), "2", .{}, opts.override(.{ .corners = .square }));
+            _ = dvui.button(@src(), "7", .{}, opts.override(.{ .corners = .square }));
+            _ = dvui.button(@src(), "100", .{}, opts.override(.{ .corners = .square }));
+            _ = dvui.button(@src(), "mixed", .{}, opts.override(.{ .corners = .square }));
+        }
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
+
+            dvui.label(@src(), "Round: ", .{}, .{});
+            left_alignment.spacer(@src(), 0);
+
+            const opts: Options = .{ .border = Rect.all(1), .background = true, .min_size_content = .{ .w = 20 } };
+            _ = dvui.button(@src(), "0", .{}, opts.override(.{ .corners = .round(0) }));
+            _ = dvui.button(@src(), "2", .{}, opts.override(.{ .corners = .round(2) }));
+            _ = dvui.button(@src(), "7", .{}, opts.override(.{ .corners = .round(7) }));
+            _ = dvui.button(@src(), "100", .{}, opts.override(.{ .corners = .round(100) }));
+            _ = dvui.button(@src(), "mixed", .{}, opts.override(.{ .corners = .{ .tr = .round(2), .br = .round(7), .bl = .round(100) } }));
+        }
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
+
+            dvui.label(@src(), "Chamfer: ", .{}, .{});
+            left_alignment.spacer(@src(), 0);
+
+            const opts: Options = .{ .border = Rect.all(1), .background = true, .min_size_content = .{ .w = 20 } };
+            _ = dvui.button(@src(), "0", .{}, opts.override(.{ .corners = .chamfer(0) }));
+            _ = dvui.button(@src(), "2", .{}, opts.override(.{ .corners = .chamfer(2) }));
+            _ = dvui.button(@src(), "7", .{}, opts.override(.{ .corners = .chamfer(7) }));
+            _ = dvui.button(@src(), "100", .{}, opts.override(.{ .corners = .chamfer(100) }));
+            _ = dvui.button(@src(), "mixed", .{}, opts.override(.{ .corners = .{ .tr = .chamfer(2), .br = .chamfer(7), .bl = .chamfer(100) } }));
+        }
     }
 
     dvui.label(@src(), "directly set colors", .{}, .{});
@@ -123,7 +221,7 @@ pub fn styling() void {
         const alpha = dvui.dataGetPtrDefault(null, hbox.data().id, "alpha", f32, 0.5);
 
         {
-            var vbox = dvui.box(@src(), .{}, .{ .margin = dvui.Rect.all(30), .min_size_content = .{ .w = 200, .h = 100 }, .corner_radius = dvui.Rect.all(5), .background = true, .border = if (border.*) dvui.Rect.all(1) else null, .box_shadow = .{ .color = backbox_color, .corner_radius = dvui.Rect.all(radius.*), .shrink = shrink.*, .offset = offset.*, .fade = fade.*, .alpha = alpha.* } });
+            var vbox = dvui.box(@src(), .{}, .{ .margin = dvui.Rect.all(30), .min_size_content = .{ .w = 200, .h = 100 }, .corners = .all(5), .background = true, .border = if (border.*) dvui.Rect.all(1) else null, .box_shadow = .{ .color = backbox_color, .corners = .all(radius.*), .shrink = shrink.*, .offset = offset.*, .fade = fade.*, .alpha = alpha.* } });
             defer vbox.deinit();
             dvui.label(@src(), "Box shadows", .{}, .{ .gravity_x = 0.5 });
             _ = dvui.checkbox(@src(), border, "border", .{});
@@ -153,7 +251,7 @@ pub fn styling() void {
 
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
-            path.addRect(rs.r, dvui.Rect.Physical.all(5));
+            path.addRect(rs.r, .round(5));
 
             var triangles = path.build().fillConvexTriangles(dvui.currentWindow().lifo(), .{ .color = .white, .center = rs.r.center() }) catch dvui.Triangles.empty;
             defer triangles.deinit(dvui.currentWindow().lifo());
@@ -230,9 +328,9 @@ pub fn rgbSliders(src: std.builtin.SourceLocation, color: *dvui.Color, opts: Opt
     var hbox = dvui.box(src, .{ .dir = .horizontal, .equal_space = true }, opts);
     defer hbox.deinit();
 
-    var red: f32 = @floatFromInt(color.r);
-    var green: f32 = @floatFromInt(color.g);
-    var blue: f32 = @floatFromInt(color.b);
+    var red: f32 = color.r;
+    var green: f32 = color.g;
+    var blue: f32 = color.b;
 
     var changed = false;
     if (dvui.sliderEntry(@src(), "R: {d:0.0}", .{ .value = &red, .min = 0, .max = 255, .interval = 1 }, .{ .gravity_y = 0.5 })) {
@@ -245,9 +343,9 @@ pub fn rgbSliders(src: std.builtin.SourceLocation, color: *dvui.Color, opts: Opt
         changed = true;
     }
 
-    color.r = @intFromFloat(red);
-    color.g = @intFromFloat(green);
-    color.b = @intFromFloat(blue);
+    color.r = @trunc(red);
+    color.g = @trunc(green);
+    color.b = @trunc(blue);
 
     return changed;
 }
@@ -297,3 +395,4 @@ const dvui = @import("../dvui.zig");
 const Examples = @import("../Examples.zig");
 const Options = dvui.Options;
 const Rect = dvui.Rect;
+const CornerRect = dvui.CornerRect;

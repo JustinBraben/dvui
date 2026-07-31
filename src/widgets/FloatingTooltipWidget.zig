@@ -23,7 +23,7 @@ fn tooltipSet(tt: ?*FloatingTooltipWidget) ?*FloatingTooltipWidget {
 pub var defaults: Options = .{
     .name = "Tooltip",
     .style = .content,
-    .corner_radius = Rect.all(5),
+    .corners = .default,
     .border = Rect.all(1),
     .background = true,
 };
@@ -62,7 +62,8 @@ parent_tooltip: ?*FloatingTooltipWidget = null,
 render_ftb: dvui.RenderFrontToBack = undefined,
 wd: WidgetData,
 /// SAFETY: Set by `install`
-prev_windowId: dvui.Id = undefined,
+prev_windowInfo: dvui.subwindowCurrentSetReturn = undefined,
+prev_scroll: ?*dvui.ScrollContainerWidget = undefined,
 /// SAFETY: Set by `install`
 prevClip: Rect.Physical = undefined,
 scale_val: f32,
@@ -97,10 +98,17 @@ pub fn init(self: *FloatingTooltipWidget, src: std.builtin.SourceLocation, init_
             // rectFor/minSizeForChild which is important because we are outside
             // normal layout
             .rect = opts_in.rect orelse .{},
+            // Identity only — the rest of `opts_in` styles the *content* (see
+            // `self.options` below) and must not reach layout here. Without
+            // these, every tooltip sharing a source location shares an id, so
+            // one of them showing makes all of them show (`_showing` is keyed
+            // by id) and they collide in `subwindowAdd`.
+            .id_extra = opts_in.id_extra,
+            .tag = opts_in.tag,
         })),
         // get scale from parent
         .scale_val = init_opts.scale orelse (dvui.parentGet().screenRectScale(Rect{}).s / dvui.windowNaturalScale()),
-        .options = defaults.themeOverride(opts_in.theme).override(opts_in),
+        .options = defaults.override(opts_in),
         .init_options = init_opts,
     };
 
@@ -181,23 +189,23 @@ pub fn shown(self: *FloatingTooltipWidget) bool {
 
 pub fn install(self: *FloatingTooltipWidget) void {
     self.installed = true;
-    self.data().register();
-    self.render_ftb.initReset();
 
+    self.data().register();
     dvui.parentSet(self.widget());
 
-    self.prev_windowId = dvui.subwindowCurrentSet(self.data().id, null).id;
+    // standard subwindow stuff
+    {
+        const rs = self.data().rectScale();
+        self.render_ftb.initReset();
+        self.prev_windowInfo = dvui.subwindowCurrentSet(self.data().id, null);
+        dvui.subwindowAdd(self.data().id, self.data().rect, rs.r, false, self.prev_windowInfo.id, true);
+        dvui.captureMouseMaintain(.{ .id = self.data().id, .rect = rs.r, .subwindow_id = self.data().id });
+        self.prevClip = dvui.clipGet();
+        dvui.clipSet(dvui.windowRectPixels()); // break out of whatever clipping we were in
+        self.prev_scroll = dvui.ScrollContainerWidget.scrollSet(null);
+    }
+
     self.parent_tooltip = tooltipSet(self);
-
-    const rs = self.data().rectScale();
-
-    dvui.subwindowAdd(self.data().id, self.data().rect, rs.r, false, self.prev_windowId, true);
-    dvui.captureMouseMaintain(.{ .id = self.data().id, .rect = rs.r, .subwindow_id = self.data().id });
-
-    // first clip to the whole window to break out of whatever clipping we
-    // might have been in (example: might be nested inside another tooltip)
-    self.prevClip = dvui.clipGet();
-    dvui.clipSet(dvui.windowRectPixels());
 
     if (self.init_options.delay) |delay| {
         self.animate = @as(dvui.AnimateWidget, undefined);
@@ -259,9 +267,14 @@ pub fn deinit(self: *FloatingTooltipWidget) void {
 
     _ = tooltipSet(self.parent_tooltip);
     dvui.parentReset(self.data().id, self.data().parent);
-    _ = dvui.subwindowCurrentSet(self.prev_windowId, null);
-    dvui.clipSet(self.prevClip);
-    self.render_ftb.deinit();
+
+    // standard subwindow stuff
+    {
+        _ = dvui.ScrollContainerWidget.scrollSet(self.prev_scroll);
+        _ = dvui.subwindowCurrentSet(self.prev_windowInfo.id, self.prev_windowInfo.rect);
+        dvui.clipSet(self.prevClip);
+        self.render_ftb.deinit();
+    }
 }
 
 // Return 0 until 80% of time then fade in remaining 20% linearly.

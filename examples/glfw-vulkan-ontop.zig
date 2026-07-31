@@ -20,9 +20,6 @@ const DeviceWrapper = vk.DeviceWrapper;
 const Instance = vk.InstanceProxy;
 const Device = vk.DeviceProxy;
 
-var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = gpa_instance.allocator();
-
 // Function-pointer dispatch tables (one per layer).
 var vkb: BaseWrapper = undefined;
 var vki: InstanceWrapper = undefined;
@@ -50,13 +47,13 @@ const SwapchainData = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(main_init: std.process.Init) !void {
     if (@import("builtin").os.tag == .windows) { // optional
         // on windows graphical apps have no console, so output goes to nowhere - attach it manually. related: https://github.com/ziglang/zig/issues/4196
         try dvui.Backend.Common.windowsAttachConsole();
     }
 
-    defer _ = gpa_instance.deinit();
+    const gpa = main_init.gpa;
     dvui.Examples.show_demo_window = true;
 
     // ------------------------------------------------------------------ //
@@ -93,12 +90,24 @@ pub fn main() !void {
     var sc = try createSwapchain(gpa, &instance, &device, phys_dev, surface, queue_families, window);
     errdefer sc.destroy(&device, gpa);
 
-    // Render pass: one color attachment, clear on load, present_src_khr final layout.
-    // dvui's pipeline is compiled against this pass — keep them in sync.
-    const render_pass = try createRenderPass(&device, sc.format);
-    defer device.destroyRenderPass(render_pass, null);
+    // ------------------------------------------------------------------ //
+    // DVUI RENDERER INIT (done before framebuffers so we can get the render pass)
+    // ------------------------------------------------------------------ //
+    var renderer = try dvui.render_backend.init(gpa, dvui.render_backend.InitOptions{
+        .instance = &instance,
+        .device = &device,
+        .physical_device = phys_dev,
+        .graphics_queue = graphics_queue,
+        .graphics_queue_family = queue_families.graphics,
+        .color_format = sc.format,
+        .load_op = .clear,
+        .clear_value = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1.0 } },
+        .frames_in_flight = MAX_FRAMES_IN_FLIGHT,
+    });
+    defer renderer.deinit();
 
-    var framebuffers = try createFramebuffers(gpa, &device, render_pass, sc.views, sc.extent);
+    // dvui creates the render pass internally — retrieve it to build framebuffers.
+    var framebuffers = try createFramebuffers(gpa, &device, renderer.renderPass(), sc.views, sc.extent);
     errdefer {
         for (framebuffers) |fb| device.destroyFramebuffer(fb, null);
         gpa.free(framebuffers);
@@ -135,25 +144,9 @@ pub fn main() !void {
     };
 
     // ------------------------------------------------------------------ //
-    // DVUI RENDERER INIT
-    // dvui creates its own pipeline (compatible with render_pass),
-    // descriptor pool, and host-visible vertex/index buffers.
-    // It does NOT create an instance, device, swapchain, or framebuffers.
-    // ------------------------------------------------------------------ //
-    var renderer = try dvui.render_backend.init(gpa, dvui.render_backend.InitOptions{
-        .instance = &instance,
-        .device = &device,
-        .physical_device = phys_dev,
-        .graphics_queue = graphics_queue,
-        .graphics_queue_family = queue_families.graphics,
-        .render_pass = render_pass,
-    });
-    defer renderer.deinit();
-
-    // ------------------------------------------------------------------ //
     // DVUI WINDOW/INPUT BACKEND (handles GLFW events — no Vulkan here)
     // ------------------------------------------------------------------ //
-    var impl = Backend.init(gpa, window);
+    var impl = Backend.init(main_init.io, gpa, window);
     defer impl.deinit();
 
     const backend = dvui.Backend.init(&impl, &renderer);
@@ -175,7 +168,7 @@ pub fn main() !void {
         }
 
         // Wait for the GPU to finish with this frame's resources.
-        _ = try device.waitForFences(1, @ptrCast(&in_flight_fences[current_frame]), .true, std.math.maxInt(u64));
+        _ = try device.waitForFences(&[_]vk.Fence{in_flight_fences[current_frame]}, .true, std.math.maxInt(u64));
 
         // Acquire the next swapchain image.
         const acquire = device.acquireNextImageKHR(
@@ -185,47 +178,38 @@ pub fn main() !void {
             .null_handle,
         ) catch |err| {
             if (err == error.OutOfDateKHR) {
-                try recreateSwapchain(gpa, &instance, &device, phys_dev, surface, queue_families, window, render_pass, &sc, &framebuffers);
+                try recreateSwapchain(gpa, &instance, &device, phys_dev, surface, queue_families, window, renderer.renderPass(), &sc, &framebuffers);
                 continue :outer;
             }
             return err;
         };
         if (acquire.result == .suboptimal_khr) {
             // Render this frame but recreate before next.
-            try recreateSwapchain(gpa, &instance, &device, phys_dev, surface, queue_families, window, render_pass, &sc, &framebuffers);
+            try recreateSwapchain(gpa, &instance, &device, phys_dev, surface, queue_families, window, renderer.renderPass(), &sc, &framebuffers);
             continue :outer;
         }
         const img_index = acquire.image_index;
 
         // Reset fence only after a successful acquire.
-        try device.resetFences(1, @ptrCast(&in_flight_fences[current_frame]));
+        try device.resetFences(&[_]vk.Fence{in_flight_fences[current_frame]});
 
         // Record commands.
         const cmd = cmd_bufs[current_frame];
         try device.resetCommandBuffer(cmd, .{});
         try device.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
 
-        const clear_value = vk.ClearValue{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1.0 } } };
-        device.cmdBeginRenderPass(cmd, &.{
-            .render_pass = render_pass,
-            .framebuffer = framebuffers[img_index],
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = sc.extent },
-            .clear_value_count = 1,
-            .p_clear_values = @ptrCast(&clear_value),
-        }, .@"inline");
-
         // ---- DVUI INTEGRATION POINT ----
-        // After vkCmdBeginRenderPass and before vkCmdEndRenderPass:
-        renderer.setFrame(cmd, sc.extent);
+        // dvui begins/ends the render pass itself inside win.begin()/win.end().
+        // Just hand it the command buffer, framebuffer, and extent.
+        renderer.setFrame(cmd, framebuffers[img_index], sc.extent);
         impl.addAllEvents(&win);
-        try win.begin(std.time.nanoTimestamp());
+        try win.begin(impl.nanoTime());
 
         // Your dvui widgets here:
         dvui.Examples.demo(.full);
 
-        const endtime = try win.end(.{});
+        const end_micros = try win.end(.{});
 
-        device.cmdEndRenderPass(cmd);
         try device.endCommandBuffer(cmd);
 
         // Submit.
@@ -239,7 +223,7 @@ pub fn main() !void {
             .signal_semaphore_count = 1,
             .p_signal_semaphores = @ptrCast(&render_finished_sems[current_frame]),
         };
-        try device.queueSubmit(graphics_queue, 1, @ptrCast(&submit_info), in_flight_fences[current_frame]);
+        try device.queueSubmit(graphics_queue, &[_]vk.SubmitInfo{submit_info}, in_flight_fences[current_frame]);
 
         // Present.
         const present_info = vk.PresentInfoKHR{
@@ -255,7 +239,7 @@ pub fn main() !void {
         }
 
         current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-        impl.pollEventsTimeout(&win, endtime);
+        _ = impl.pollEventsTimeout(win.waitTime(end_micros));
     }
 
     // Wait for all in-flight work before cleanup.
@@ -434,45 +418,6 @@ fn createSwapchain(
     };
 }
 
-fn createRenderPass(device: *const Device, format: vk.Format) !vk.RenderPass {
-    const color_attachment = vk.AttachmentDescription{
-        .format = format,
-        .samples = .{ .@"1_bit" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .undefined,
-        .final_layout = .present_src_khr,
-    };
-    const color_ref = vk.AttachmentReference{
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    };
-    const subpass = vk.SubpassDescription{
-        .pipeline_bind_point = .graphics,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&color_ref),
-    };
-    // Wait for color-attachment-output stage before writing.
-    const dependency = vk.SubpassDependency{
-        .src_subpass = vk.SUBPASS_EXTERNAL,
-        .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true },
-        .src_access_mask = .{},
-        .dst_stage_mask = .{ .color_attachment_output_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    };
-    return device.createRenderPass(&.{
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&color_attachment),
-        .subpass_count = 1,
-        .p_subpasses = @ptrCast(&subpass),
-        .dependency_count = 1,
-        .p_dependencies = @ptrCast(&dependency),
-    }, null);
-}
-
 fn createFramebuffers(
     allocator: Allocator,
     device: *const Device,
@@ -519,6 +464,7 @@ fn recreateSwapchain(
     framebuffers.* = try createFramebuffers(allocator, device, render_pass, sc.views, sc.extent);
 }
 
+
 // ---- Instance / device setup ----
 
 fn createInstance(allocator: Allocator) !Instance {
@@ -545,6 +491,10 @@ fn createInstance(allocator: Allocator) !Instance {
         instance_create_info.enabled_extension_count = @intCast(instance_extensions.items.len);
         instance_create_info.pp_enabled_extension_names = instance_extensions.items.ptr;
     }
+
+    const validation_layers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
+    instance_create_info.enabled_layer_count = validation_layers.len;
+    instance_create_info.pp_enabled_layer_names = &validation_layers;
 
     const instance_initial = try vkb.createInstance(&instance_create_info, null);
     vki = InstanceWrapper.load(instance_initial, vkb.dispatch.vkGetInstanceProcAddr.?);

@@ -23,6 +23,10 @@ pub const InitOptions = struct {
     /// if text is rotated (for now).
     ellipsize: bool = true,
 
+    sel_start: ?usize = null,
+    sel_end: ?usize = null,
+    sel_color: ?dvui.Color = null,
+
     pub fn gravityGet(self: InitOptions) Options.Gravity {
         return .{ .x = self.align_x, .y = self.align_y };
     }
@@ -45,16 +49,14 @@ pub fn init(self: *LabelWidget, src: std.builtin.SourceLocation, comptime fmt: [
     const str, const alloc = blk: {
         const str = std.fmt.allocPrint(cw.lifo(), fmt, args) catch |err| {
             const newid = dvui.parentGet().extendId(src, opts.idExtra());
-            dvui.logError(@src(), err, "id {x} (highlighted in red) could not print its content", .{newid});
-            dvui.currentWindow().debug.widget_id = newid;
+            dvui.logError(@src(), err, "Label {x} could not print its content", .{newid});
             break :blk .{ fmt, null };
         };
         // We need to use `long_term_arena` because otherwise we
         // will not be able to free the memory of the allocPrint
         const utf8 = dvui.toUtf8(cw.arena(), str) catch |err| {
             const newid = dvui.parentGet().extendId(src, opts.idExtra());
-            dvui.logError(@src(), err, "id {x} (highlighted in red) could not allocate valid utf8 slice", .{newid});
-            dvui.currentWindow().debug.widget_id = newid;
+            dvui.logError(@src(), err, "Label {x} could not allocate valid utf8 slice", .{newid});
             // We contained invalid utf8, so textSize will fail later
             break :blk .{ str, cw.lifo() };
         };
@@ -72,7 +74,8 @@ pub fn initNoFmt(self: *LabelWidget, src: std.builtin.SourceLocation, label_str:
     // If the allocation fails, the textSize will be incorrect
     // later because of invalid utf8
     const str = dvui.toUtf8(arena, label_str) catch |err| blk: {
-        logAndHighlight(src, opts, err);
+        const newid = dvui.parentGet().extendId(src, opts.idExtra());
+        dvui.logError(@src(), err, "Label {x} could not allocate valid utf8 slice", .{newid});
         break :blk label_str;
     };
     return self.initNoFmtAllocator(src, str, if (str.ptr != label_str.ptr) arena else null, init_opts, opts);
@@ -116,12 +119,6 @@ pub fn initNoFmtAllocator(self: *LabelWidget, src: std.builtin.SourceLocation, l
     }
 }
 
-fn logAndHighlight(src: std.builtin.SourceLocation, opts: Options, err: anyerror) void {
-    const newid = dvui.parentGet().extendId(src, opts.idExtra());
-    dvui.currentWindow().debug.widget_id = newid;
-    dvui.log.err("{s}:{d} LabelWidget id {x} (highlighted in red) init() got {any}", .{ src.file, src.line, newid, err });
-}
-
 pub fn data(self: *LabelWidget) *WidgetData {
     return self.wd.validate();
 }
@@ -131,11 +128,15 @@ pub fn draw(self: *LabelWidget) void {
     const label_gravity = self.init_options.gravityGet();
     const rect = dvui.placeIn(self.data().contentRect(), self.data().options.min_size_contentGet(), .none, label_gravity);
     const rs = self.data().parent.screenRectScale(rect);
+    const sel_start = self.init_options.sel_start;
+    const sel_end = self.init_options.sel_end;
+    const sel_color = self.init_options.sel_color;
     const oldclip = if (rot == 0.0) dvui.clip(rs.r) else dvui.clipGet();
     var iter = std.mem.splitScalar(u8, self.label_str, '\n');
     var line_height_adj: ?f32 = null;
     var first: bool = true;
     var r = rs.r;
+    var line_start: usize = 0;
     while (iter.next()) |line_slice| {
         r.x = rs.r.x;
         if (first) {
@@ -204,6 +205,9 @@ pub fn draw(self: *LabelWidget) void {
             .rs = rs,
             .color = self.data().options.color(.text),
             .rotation = rot,
+            .sel_start = if (sel_start) |ss| ss -| line_start else null,
+            .sel_end = if (sel_end) |se| se -| line_start else null,
+            .sel_color = sel_color,
         }) catch |err| {
             dvui.logError(@src(), err, "Failed to render text: {s}", .{line});
         };
@@ -221,6 +225,7 @@ pub fn draw(self: *LabelWidget) void {
         }
 
         r.y += rs.s * tsize.h;
+        line_start += line_slice.len + 1; // account for newline
     }
     dvui.clipSet(oldclip);
 }

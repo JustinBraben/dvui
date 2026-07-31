@@ -5,6 +5,7 @@ const Event = dvui.Event;
 const Options = dvui.Options;
 const Rect = dvui.Rect;
 const RectScale = dvui.RectScale;
+const CornerRect = dvui.CornerRect;
 const Size = dvui.Size;
 const Widget = dvui.Widget;
 const WidgetData = dvui.WidgetData;
@@ -18,7 +19,7 @@ const MenuItemWidget = @This();
 pub var defaults: Options = .{
     .name = "Menu Item",
     .role = .menu_item,
-    .corner_radius = Rect.all(5),
+    .corners = .default,
     .padding = Rect.all(6),
     .style = .control,
 };
@@ -35,10 +36,11 @@ init_opts: InitOptions,
 activated: bool = false,
 show_active: bool = false,
 mouse_over: bool = false,
+hover_t: f32 = 0,
 
 /// It's expected to call this when `self` is `undefined`
 pub fn init(self: *MenuItemWidget, src: std.builtin.SourceLocation, init_opts: InitOptions, opts: Options) void {
-    const options = defaults.themeOverride(opts.theme).override(opts);
+    const options = defaults.override(opts);
     const wd = WidgetData.init(src, .{}, options);
 
     self.* = .{
@@ -60,6 +62,8 @@ pub fn init(self: *MenuItemWidget, src: std.builtin.SourceLocation, init_opts: I
 }
 
 pub fn drawBackground(self: *MenuItemWidget) void {
+    self.hover_t = dvui.hoverFade(self.data().id, self.highlight);
+
     var focused: bool = self.data().id == dvui.focusedWidgetId();
 
     if (self.data().id == dvui.focusedWidgetIdInCurrentSubwindow()) {
@@ -89,7 +93,7 @@ pub fn drawBackground(self: *MenuItemWidget) void {
     if (self.data().visible()) {
         const cols = self.style();
         const rs = self.data().backgroundRectScale();
-        const cr = self.data().options.corner_radiusGet().scale(rs.s, Rect.Physical);
+        const cr = self.data().options.cornersGet().scale(rs.s, CornerRect.Physical);
         if (self.show_active) {
             if (self.init_opts.focus_as_outline) {
                 self.data().focusBorder();
@@ -99,7 +103,7 @@ pub fn drawBackground(self: *MenuItemWidget) void {
             } else {
                 rs.r.fill(cr, .{ .color = cols.color(.fill), .fade = 1.0 });
             }
-        } else if ((self.data().id == dvui.focusedWidgetIdInCurrentSubwindow()) or self.highlight) {
+        } else if ((self.data().id == dvui.focusedWidgetIdInCurrentSubwindow()) or self.highlight or self.hover_t > 0) {
             rs.r.fill(cr, .{ .color = cols.color(.fill), .fade = 1.0 });
         } else if (self.data().options.backgroundGet()) {
             rs.r.fill(cr, .{ .color = cols.color(.fill), .fade = 1.0 });
@@ -111,13 +115,21 @@ pub fn drawBackground(self: *MenuItemWidget) void {
 pub fn style(self: *MenuItemWidget) Options {
     var opts: Options = self.data().options.styleOnly();
     if (self.show_active and !self.init_opts.focus_as_outline) {
+        const rest_fill = opts.color(.fill);
         opts.style = .highlight;
-        opts.color_fill = opts.color_fill_hover orelse opts.color(.fill);
-        opts.color_text = opts.color_text_hover orelse opts.color(.text_hover);
-    } else if (self.highlight) {
-        // mouse is over us
-        opts.color_fill = opts.color_fill_hover orelse opts.color(.fill_hover);
-        opts.color_text = opts.color_text_hover orelse opts.color(.text_hover);
+        const active_fill = opts.color_fill_hover orelse opts.color(.fill);
+        const active_text = opts.color_text_hover orelse opts.color(.text_hover);
+        if (self.highlight) {
+            opts.color_fill = rest_fill.lerp(active_fill, self.hover_t);
+            opts.color_text = active_text;
+        } else {
+            opts.color_fill = active_fill;
+            opts.color_text = active_text;
+        }
+    } else if (self.hover_t > 0) {
+        // mouse is over us (or just left us)
+        opts.color_fill = opts.color(.fill).lerp(opts.color_fill_hover orelse opts.color(.fill_hover), self.hover_t);
+        opts.color_text = opts.color(.text).lerp(opts.color_text_hover orelse opts.color(.text_hover), self.hover_t);
     }
 
     return opts;
@@ -203,7 +215,7 @@ pub fn processEvent(self: *MenuItemWidget, e: *Event) void {
                     // with touch we have to capture otherwise any motion will
                     // cause scroll to capture
                     dvui.captureMouse(self.data(), e.num);
-                    dvui.dragPreStart(me.p, .{});
+                    dvui.dragPreStart(me.button, me.p, .{});
                 }
             } else if (me.action == .release) {
                 e.handle(@src(), self.data());

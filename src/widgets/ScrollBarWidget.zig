@@ -124,8 +124,8 @@ pub fn processEvents(self: *ScrollBarWidget, grabrs: Rect.Physical) void {
                                 // capture and start drag
                                 dvui.captureMouse(self.data(), e.num);
                                 switch (self.dir) {
-                                    .vertical => dvui.dragPreStart(me.p, .{ .cursor = .arrow, .offset = .{ .y = me.p.y - (grabrs.y + grabrs.h / 2) } }),
-                                    .horizontal => dvui.dragPreStart(me.p, .{ .cursor = .arrow, .offset = .{ .x = me.p.x - (grabrs.x + grabrs.w / 2) } }),
+                                    .vertical => dvui.dragPreStart(me.button, me.p, .{ .cursor = .arrow, .offset = .{ .y = me.p.y - (grabrs.y + grabrs.h / 2) } }),
+                                    .horizontal => dvui.dragPreStart(me.button, me.p, .{ .cursor = .arrow, .offset = .{ .x = me.p.x - (grabrs.x + grabrs.w / 2) } }),
                                 }
                             } else {
                                 if (if (self.dir == .vertical) (me.p.y < grabrs.y) else (me.p.x < grabrs.x)) {
@@ -182,7 +182,7 @@ pub fn processEvents(self: *ScrollBarWidget, grabrs: Rect.Physical) void {
                     .wheel_x => |ticks| {
                         if (self.dir == .horizontal) {
                             e.handle(@src(), self.data());
-                            self.si.scrollByOffset(self.dir, ticks);
+                            self.si.scrollByOffset(self.dir, -ticks);
                             dvui.refresh(null, @src(), self.data().id);
                         }
                     },
@@ -205,15 +205,18 @@ pub const Grab = struct {
     color: dvui.Color,
 
     pub fn draw(self: Grab) void {
-        self.rect.fill(.all(100), .{ .color = self.color, .fade = 1.0 });
+        var corners = dvui.CornerRect.all(100).finalize(null);
+        self.rect.fill(corners.scale(1, dvui.CornerRect.Physical), .{ .color = self.color, .fade = 1.0 });
     }
 };
 
 pub fn grab(self: *ScrollBarWidget) Grab {
-    var fill = self.data().options.color(.text).opacity(0.5);
-    if (dvui.captured(self.data().id) or self.highlight) {
-        fill = self.data().options.color(.text).opacity(0.3);
-    }
+    const text = self.data().options.color(.text);
+    const hover_t = dvui.hoverFade(self.data().id, self.highlight);
+    const fill = if (dvui.captured(self.data().id))
+        text.opacity(0.3)
+    else
+        text.opacity(0.5).lerp(text.opacity(0.3), hover_t);
 
     return .{
         .rect = self.data().parent.screenRectScale(self.grabRect.insetAll(2)).r,

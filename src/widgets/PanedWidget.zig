@@ -6,6 +6,8 @@ const Options = dvui.Options;
 const Point = dvui.Point;
 const Rect = dvui.Rect;
 const RectScale = dvui.RectScale;
+const Corner = dvui.Corner;
+const CornerRect = dvui.CornerRect;
 const Size = dvui.Size;
 const Widget = dvui.Widget;
 const WidgetData = dvui.WidgetData;
@@ -104,16 +106,18 @@ pub fn init(self: *PanedWidget, src: std.builtin.SourceLocation, init_options: I
         },
     };
 
-    // autofit on the second frame, after we know the full widget size
-    if (dvui.firstFrame(wd.id)) {
-        dvui.dataSet(null, wd.id, "_autofit_next_frame", true);
-    } else if (self.should_autofit) {
-        dvui.dataRemove(null, wd.id, "_autofit_next_frame");
-    }
+    if (self.init_opts.autofit_first != null) {
+        // autofit on the second frame, after we know the full widget size
+        if (dvui.firstFrame(wd.id)) {
+            dvui.dataSet(null, wd.id, "_autofit_next_frame", true);
+        } else if (self.should_autofit) {
+            dvui.dataRemove(null, wd.id, "_autofit_next_frame");
+        }
 
-    if (self.init_opts.autofit_first != null and self.should_autofit) {
-        // Make the first side take the full space to begin with
-        self.split_ratio.* = 1.0;
+        if (self.should_autofit) {
+            // Make the first side take the full space to begin with
+            self.split_ratio.* = 1.0;
+        }
     }
 
     if (self.collapsing) {
@@ -234,7 +238,8 @@ pub fn draw(self: *PanedWidget) void {
             r.w = width;
         },
     }
-    r.fill(.all(thick), .{ .color = self.data().options.color(.text).opacity(0.5), .fade = 1.0 });
+    const corner = CornerRect.all(thick).finalize(self.data().options.theme).scale(1, CornerRect.Physical);
+    r.fill(corner, .{ .color = self.data().options.color(.text).opacity(0.5), .fade = 1.0 });
 }
 
 pub fn collapsed(self: *PanedWidget) bool {
@@ -349,7 +354,7 @@ pub fn rectFor(self: *PanedWidget, id: dvui.Id, min_size: Size, e: Options.Expan
         .none => {
             dvui.log.err("{s}:{d}: Paned widget {x} cannot add child widget {x} outside a first/second side", .{ self.data().src.file, self.data().src.line, self.data().id, id });
             // Highlight the widget in red
-            dvui.currentWindow().debug.widget_id = id;
+            dvui.Debug.errorOutline(self.data().rectScale().r);
             // Place within the entire content rect just so that the widget shows up on screen
             // (probably covered by the panes, but the red outline will show)
         },
@@ -435,7 +440,7 @@ pub fn processEvent(self: *PanedWidget, e: *Event) void {
                 e.handle(@src(), self.data());
                 // capture and start drag
                 dvui.captureMouse(self.data(), e.num);
-                dvui.dragPreStart(e.evt.mouse.p, .{ .cursor = cursor });
+                dvui.dragPreStart(e.evt.mouse.button, e.evt.mouse.p, .{ .cursor = cursor });
             } else if (e.evt.mouse.action == .release and e.evt.mouse.button.pointer()) {
                 e.handle(@src(), self.data());
                 // stop possible drag and capture

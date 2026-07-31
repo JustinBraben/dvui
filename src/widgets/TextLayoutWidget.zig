@@ -50,6 +50,8 @@ pub const InitOptions = struct {
 
     focused: ?bool = null,
     show_touch_draggables: bool = true,
+
+    process_events_in_deinit: bool = true,
 };
 
 pub const Selection = struct {
@@ -115,21 +117,35 @@ const TextRunSelectionInfo = struct {
     pos: usize,
 };
 
+// Used to record from last frame lines where we need to start with extra
+// vertical space, because text later in the line has a larger ascent than
+// earlier in the line.
+const LineAscent = struct {
+    line: usize,
+    ascent: f32,
+};
+
 /// This is used for word selection - 2 clicks and ctrl+left/right - everything
 /// here is not a word, and everything else is.
 pub const word_breaks = " \n!\"#$%&()*+,-./:;<=>?@[\\]^_`{|}~";
 
 wd: WidgetData,
-corners: [4]?Rect = [_]?Rect{null} ** 4,
-corners_min_size: [4]?Size = [_]?Size{null} ** 4,
+corners: [4]?Rect = @splat(null),
+corners_min_size: [4]?Size = @splat(null),
 corners_last_seen: ?u8 = null,
 insert_pt: Point = Point{},
 current_line_height: f32 = 0.0,
+current_line_ascent: f32 = 0.0,
+current_line_ascent_recorded: f32 = 0.0,
+line_ascents_idx: usize = 0,
+line_ascents: []LineAscent = &.{}, // from last frame
+line_ascents_new: std.ArrayList(LineAscent) = .empty, // creating this frame
 prevClip: Rect.Physical = .{},
 kerning: ?bool,
 break_lines: bool,
 current_line_width: f32 = 0.0, // width of lines if break_lines was false
 touch_edit_just_focused: bool,
+process_events_in_deinit: bool,
 
 cursor_pt: ?Point = null,
 cursor_event: ?dvui.Event.EventTypes = null,
@@ -138,6 +154,7 @@ click_event: ?dvui.Event.EventTypes = null,
 click_num: u8 = 0,
 click_num_pt: dvui.Point.Physical = .{},
 
+line: usize = 0,
 bytes_seen: usize = 0,
 first_byte_in_line: usize = 0,
 /// might point to `selection_store`
@@ -175,7 +192,7 @@ sel_move: union(enum) {
     char_left_right: struct {
         count: i8 = 0,
         select: bool = true, // false - move cursor, true - change selection
-        buf: [20]u8 = [1]u8{0} ** 20, // only used when count < 0
+        buf: [20]u8 = @splat(0), // only used when count < 0
     },
 
     // moving cursor up/down
@@ -250,11 +267,12 @@ pub fn init(self: *TextLayoutWidget, src: std.builtin.SourceLocation, init_opts:
     const options = defaults.override(opts);
 
     self.* = .{
-        .wd = WidgetData.init(src, .{}, options),
+        .wd = WidgetData.init(src, .{ .scroll_when_focused = false }, options),
         .break_lines = init_opts.break_lines,
         .cache_layout = init_opts.cache_layout,
         .kerning = init_opts.kerning,
         .touch_edit_just_focused = init_opts.touch_edit_just_focused,
+        .process_events_in_deinit = init_opts.process_events_in_deinit,
 
         // SAFETY: set bellow
         .selection = undefined,
@@ -271,6 +289,7 @@ pub fn init(self: *TextLayoutWidget, src: std.builtin.SourceLocation, init_opts:
     if (dvui.dataGet(null, self.wd.id, "_click_num", u8)) |val| self.click_num = val;
     if (dvui.dataGet(null, self.wd.id, "_click_num_pt", dvui.Point.Physical)) |val| self.click_num_pt = val;
     if (dvui.dataGetSlice(null, self.wd.id, "_byte_heights", []ByteHeight)) |bh| self.byte_heights = bh;
+    if (dvui.dataGetSlice(null, self.wd.id, "__line_ascents", []LineAscent)) |la| self.line_ascents = la;
 
     if (dvui.dataGet(null, self.wd.id, "_scroll_to_cursor", bool) orelse false) {
         dvui.dataRemove(null, self.wd.id, "_scroll_to_cursor");
@@ -513,7 +532,7 @@ pub fn addText(self: *TextLayoutWidget, text: []const u8, opts: Options) void {
 }
 
 pub fn addTextClick(self: *TextLayoutWidget, text: []const u8, opts: Options) ?dvui.Event.EventTypes {
-    return self.addTextEx(text, .click, opts);
+    return if (self.addTextEx(text, .click, opts)) |m| m.event else null;
 }
 
 pub const AddLinkOptions = struct {
@@ -525,14 +544,20 @@ pub const AddLinkOptions = struct {
 };
 
 pub fn addLink(self: *TextLayoutWidget, init_opts: AddLinkOptions, opts: Options) void {
-    const defs: Options = .{ .color_text = dvui.themeGet().focus };
+    const defs: Options = .{ .color_text = dvui.themeGet().focus, .font = dvui.Font.theme(.body).withUnderline(.{}) };
     if (self.addTextClick(init_opts.text orelse init_opts.url, defs.override(opts))) |click_event| {
         const new_window = (click_event == .mouse and (click_event.mouse.button == .middle or click_event.mouse.mod.matchBind("ctrl/cmd")));
         _ = dvui.openURL(.{ .url = init_opts.url, .new_window = new_window });
     }
 }
 
-pub fn addTextHover(self: *TextLayoutWidget, text: []const u8, opts: Options) ?dvui.Event.EventTypes {
+/// A hover/click match against a run of text
+pub const HoverMatch = struct {
+    event: dvui.Event.EventTypes,
+    rect: Rect,
+};
+
+pub fn addTextHover(self: *TextLayoutWidget, text: []const u8, opts: Options) ?HoverMatch {
     return self.addTextEx(text, .hover, opts);
 }
 
@@ -750,16 +775,16 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
                 const search = if (ep.which == .word) word_breaks else "\n";
                 if (!self.cursor_seen) {
                     // maintain index of last punc we saw
-                    if (std.mem.lastIndexOfAny(u8, txt, search)) |space| {
+                    if (std.mem.findLastAny(u8, txt, search)) |space| {
                         ep.last[1] = ep.last[0];
                         ep.last[0] = start_idx + space + 1;
-                        if (std.mem.lastIndexOfAny(u8, txt[0..space], search)) |space2| {
+                        if (std.mem.findLastAny(u8, txt[0..space], search)) |space2| {
                             ep.last[1] = start_idx + space2 + 1;
                         }
                     }
                 } else {
                     // searching for next punc
-                    if (std.mem.indexOfAny(u8, txt, search)) |space| {
+                    if (std.mem.findAny(u8, txt, search)) |space| {
                         // found within our current text
                         self.selection.moveCursor(start_idx + space, ep.select);
                         ep.done = true;
@@ -827,14 +852,14 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
             if (wlr.count < 0) {
                 // maintain our list of previous starts of words, looking backwards
                 var idx = txt.len -| 1;
-                var last_kind: enum { punc, word } = if (std.mem.indexOfAnyPos(u8, txt, idx, word_breaks) != null) .punc else .word;
+                var last_kind: enum { punc, word } = if (std.mem.findAnyPos(u8, txt, idx, word_breaks) != null) .punc else .word;
 
                 var word_start_count: usize = 0;
 
                 loop: while (word_start_count < wlr.word_start_idx.len) {
                     switch (last_kind) {
                         .punc => {
-                            if (std.mem.lastIndexOfNone(u8, txt[0..idx], word_breaks)) |word_end| {
+                            if (std.mem.findLastNone(u8, txt[0..idx], word_breaks)) |word_end| {
                                 last_kind = .word;
                                 idx = word_end;
                             } else {
@@ -844,7 +869,7 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
                         },
                         .word => {
                             var new_word_start: ?usize = null;
-                            if (std.mem.lastIndexOfAny(u8, txt[0..idx], word_breaks)) |punc| {
+                            if (std.mem.findLastAny(u8, txt[0..idx], word_breaks)) |punc| {
                                 last_kind = .punc;
                                 idx = punc;
                                 new_word_start = idx + 1;
@@ -874,7 +899,7 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
                 }
 
                 // record last character kind for next iteration
-                if (std.mem.indexOfAnyPos(u8, txt, txt.len -| 1, word_breaks) != null) {
+                if (std.mem.findAnyPos(u8, txt, txt.len -| 1, word_breaks) != null) {
                     wlr.scratch_kind = .punc;
                 } else {
                     wlr.scratch_kind = .word;
@@ -890,7 +915,7 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
                 switch (wlr.scratch_kind) {
                     .punc => {
                         // skipping over punc
-                        if (std.mem.indexOfNonePos(u8, txt, self.selection.cursor -| start_idx, word_breaks)) |non_blank| {
+                        if (std.mem.findNonePos(u8, txt, self.selection.cursor -| start_idx, word_breaks)) |non_blank| {
                             self.selection.moveCursor(start_idx + non_blank, wlr.select);
                             wlr.scratch_kind = .word; // now want to skip over word chars
                         } else {
@@ -901,7 +926,7 @@ fn selMoveText(self: *TextLayoutWidget, txt: []const u8, start_idx: usize) void 
                     },
                     .word => {
                         // skipping over word chars
-                        if (std.mem.indexOfAnyPos(u8, txt, self.selection.cursor -| start_idx, word_breaks)) |punc| {
+                        if (std.mem.findAnyPos(u8, txt, self.selection.cursor -| start_idx, word_breaks)) |punc| {
                             self.selection.moveCursor(start_idx + punc, wlr.select);
                             // done with this one
                             wlr.scratch_kind = .punc; // now want to skip over punc
@@ -1049,6 +1074,9 @@ pub const ByteHeight = struct {
 
     /// height from top of text layout content rect
     height: f32,
+
+    /// used to integrate with line_ascents
+    line: usize,
 };
 
 const bytesNeededReturn = struct { start: usize, end: usize };
@@ -1058,7 +1086,7 @@ pub fn bytesNeeded(self: *TextLayoutWidget, edit_start: usize, edit_end: usize, 
 
     // intersect our content rect with the clipping rect
     const clip_logical = self.data().contentRectScale().rectFromPhysical(dvui.clipGet());
-    const vr = self.data().contentRect().intersect(clip_logical);
+    const vr = self.data().contentRect().justSize().intersect(clip_logical);
 
     var start_byte: usize = 0;
     var end_byte: usize = self.byte_heights[self.byte_heights.len - 1].byte;
@@ -1123,6 +1151,7 @@ pub fn bytesNeeded(self: *TextLayoutWidget, edit_start: usize, edit_end: usize, 
         start_byte = startBH.byte;
 
         self.insert_pt.y = startBH.height;
+        self.line = startBH.line;
         self.bytes_seen = start_byte;
 
         if (!include_cursor and (self.selection.cursor < self.bytes_seen)) {
@@ -1153,6 +1182,12 @@ pub fn bytesNeeded(self: *TextLayoutWidget, edit_start: usize, edit_end: usize, 
 
         // copy all the ByteHeights we skipped
         self.byte_heights_new.appendSlice(dvui.currentWindow().arena(), self.byte_heights[0..first_past_height]) catch {};
+
+        // copy all the LineAscents we skipped
+        var i: usize = 0;
+        while (i < self.line_ascents.len and self.line_ascents[i].line < startBH.line) i += 1;
+        self.line_ascents_new.appendSlice(dvui.currentWindow().arena(), self.line_ascents[0..i]) catch {};
+        self.line_ascents_idx = i;
     }
 
     // linear scan for the end (but not the final)
@@ -1181,47 +1216,64 @@ pub fn bytesNeeded(self: *TextLayoutWidget, edit_start: usize, edit_end: usize, 
     return .{ .start = start_byte, .end = end_byte };
 }
 
+fn checkAscent(self: *TextLayoutWidget) void {
+    if (self.line_ascents_new.items.len > 0 and
+        self.line_ascents_new.items[self.line_ascents_new.items.len - 1].line == self.line)
+    {
+        if (self.current_line_ascent_recorded != self.line_ascents_new.items[self.line_ascents_new.items.len - 1].ascent) {
+            // ascent we are recording this frame is different from last frame
+            dvui.refresh(null, @src(), self.data().id);
+        }
+    }
+}
+
+pub fn cacheLayoutBytes(self: *TextLayoutWidget) ?bytesNeededReturn {
+    if (self.cache_layout_bytes == null) self.cache_layout_bytes = self.bytesNeeded(std.math.maxInt(usize), 0, 0);
+    return self.cache_layout_bytes;
+}
+
 const AddTextExAction = enum {
     none,
     click,
     hover,
 };
 
-fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExAction, opts: Options) ?dvui.Event.EventTypes {
-    var ret: ?dvui.Event.EventTypes = null;
+fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExAction, opts: Options) ?HoverMatch {
+    var ret: ?HoverMatch = null;
     const cw = dvui.currentWindow();
 
     // clip to content rect for all text
     _ = dvui.clip(self.data().contentRectScale().r);
     self.newline = false;
 
-    var txt = dvui.toUtf8(cw.lifo(), text_in) catch |err| blk: {
-        dvui.logError(@src(), err, "Failed to convert to utf8", .{});
-        break :blk text_in;
-    };
-    defer if (txt.ptr != txt.ptr) cw.lifo().free(txt);
-
+    // Slice down to the visible byte range before `toUtf8` below
+    var visible_chunk = text_in;
     if (self.cache_layout) {
-        if (self.cache_layout_bytes == null) self.cache_layout_bytes = self.bytesNeeded(std.math.maxInt(usize), 0, 0);
-
-        if (self.cache_layout_bytes) |clb| {
-            const start = @min(txt.len, clb.start -| self.cache_layout_bytes_seen);
-            const end = @min(txt.len, clb.end -| self.cache_layout_bytes_seen);
-            self.cache_layout_bytes_seen += txt.len;
+        if (self.cacheLayoutBytes()) |clb| {
+            const start = @min(visible_chunk.len, clb.start -| self.cache_layout_bytes_seen);
+            const end = @min(visible_chunk.len, clb.end -| self.cache_layout_bytes_seen);
+            self.cache_layout_bytes_seen += visible_chunk.len;
 
             //std.debug.print("{d} clb {d} .. {d} bytes {d} taking {d} .. {d}\n", .{ self.bytes_seen, clb.start, clb.end, self.cache_layout_bytes_seen, start, end });
 
-            txt = txt[start..end];
-            if (txt.len == 0) return null;
+            visible_chunk = visible_chunk[start..end];
+            if (visible_chunk.len == 0) return null;
         } else {
             // bytesNeeded returned null, we can't do it this frame
             self.cache_layout = false;
         }
     }
 
+    var txt = dvui.toUtf8(cw.lifo(), visible_chunk) catch |err| blk: {
+        dvui.logError(@src(), err, "Failed to convert to utf8", .{});
+        break :blk visible_chunk;
+    };
+    defer if (txt.ptr != visible_chunk.ptr) cw.lifo().free(txt);
+
     const options = self.data().options.override(opts);
-    const msize = options.fontGet().sizeM(1, 1);
-    const line_height = options.fontGet().lineHeight();
+    const font = options.fontGet();
+    const msize = font.sizeM(1, 1);
+    const line_height = font.lineHeight();
 
     var container_width = self.data().contentRect().w;
     if (container_width == 0) {
@@ -1284,12 +1336,19 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
         var kern_buf: [10]u32 = @splat(0);
 
         // get slice of text that fits within width or ends with newline
-        var s = options.fontGet().textSizeEx(txt, .{ .kerning = self.kerning, .max_width = if (self.break_lines) width else null, .end_idx = &end, .kern_out = &kern_buf });
+        var ascent: f32 = undefined;
+        var s = font.textSizeEx(txt, .{
+            .kerning = self.kerning,
+            .max_width = if (self.break_lines) width else null,
+            .end_idx = &end,
+            .kern_out = &kern_buf,
+            .ascent_out = &ascent,
+        });
 
         // ensure we always get at least 1 codepoint so we make progress
         if (end == 0) {
             end = std.unicode.utf8ByteSequenceLength(txt[0]) catch 1;
-            s = options.fontGet().textSizeEx(txt[0..end], .{ .kerning = self.kerning });
+            s = font.textSizeEx(txt[0..end], .{ .kerning = self.kerning });
         }
 
         self.newline = (txt[end - 1] == '\n');
@@ -1304,10 +1363,10 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
             if (end < txt.len and !self.newline and linewidth > (10 * msize.w)) {
                 // now we are under the length limit but might be in the middle of a word
                 // look one char further because we might be right at the end of a word
-                const spaceIdx = std.mem.lastIndexOfLinear(u8, txt[0 .. end + 1], " ");
+                const spaceIdx = std.mem.findLastLinear(u8, txt[0 .. end + 1], " ");
                 if (spaceIdx) |si| {
                     end = si + 1;
-                    s = options.fontGet().textSizeEx(txt[0..end], .{ .kerning = self.kerning, .kern_in = &kern_buf });
+                    s = font.textSizeEx(txt[0..end], .{ .kerning = self.kerning, .kern_in = &kern_buf });
                     break :blk; // this part will fit
                 }
 
@@ -1319,9 +1378,13 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
             // - we aren't starting at the left edge
             // both mean dropping to next line will give us more space
             if (s.w > width and (linewidth < container_width or self.insert_pt.x > linestart)) {
+                self.checkAscent();
+                self.line += 1;
                 self.insert_pt.y += self.current_line_height;
                 self.insert_pt.x = 0;
                 self.current_line_height = 0;
+                self.current_line_ascent = 0;
+                self.current_line_ascent_recorded = 0;
 
                 self.lineBreak();
 
@@ -1332,6 +1395,29 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
         }
 
         // now we know the line of text we are about to render
+
+        if (self.current_line_ascent == 0.0) {
+            // this is the first text
+            self.current_line_ascent = ascent;
+
+            while (self.line_ascents.len > self.line_ascents_idx + 1 and self.line_ascents[self.line_ascents_idx].line < self.line) {
+                self.line_ascents_idx += 1;
+            }
+            if (self.line_ascents_idx < self.line_ascents.len and self.line_ascents[self.line_ascents_idx].line == self.line) {
+                self.current_line_ascent_recorded = self.line_ascents[self.line_ascents_idx].ascent;
+            }
+        } else if (ascent > self.current_line_ascent) {
+            // we only care if the ascent got bigger, meaning we already laid
+            // out some text badly, so need this info for next frame
+            if (self.line_ascents_new.items.len > 0 and self.line_ascents_new.items[self.line_ascents_new.items.len - 1].line == self.line) {
+                self.line_ascents_new.items[self.line_ascents_new.items.len - 1].ascent = ascent;
+            } else {
+                self.line_ascents_new.append(cw.arena(), .{ .line = self.line, .ascent = ascent }) catch {};
+            }
+
+            self.current_line_ascent = ascent;
+        }
+
         // see if selection needs to be updated
 
         // if the text changed our selection might be in the middle of utf8 chars, so fix it up
@@ -1355,7 +1441,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
                     if (action == .click) {
                         dvui.cursorSet(.hand);
                     } else if (action == .hover) {
-                        ret = self.cursor_event;
+                        ret = .{ .event = self.cursor_event.?, .rect = rs };
                     }
                 }
             }
@@ -1364,7 +1450,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
                 const rs = Rect{ .x = self.insert_pt.x, .y = self.insert_pt.y, .w = s.w, .h = s.h };
                 if (p.x > rs.x and p.x < (rs.x + rs.w) and p.y > rs.y and p.y < (rs.y + rs.h)) {
                     if (action == .click) {
-                        ret = self.click_event;
+                        ret = .{ .event = self.click_event.?, .rect = rs };
                     }
                 }
             }
@@ -1387,7 +1473,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
                         // point is in this text
                         const how_far = p.x - rs.x;
                         var pt_end: usize = undefined;
-                        _ = options.fontGet().textSizeEx(txt, .{ .kerning = self.kerning, .max_width = how_far, .end_idx = &pt_end, .end_metric = .nearest });
+                        _ = font.textSizeEx(txt, .{ .kerning = self.kerning, .max_width = how_far, .end_idx = &pt_end, .end_metric = .nearest });
                         sel_bytes[i] = self.bytes_seen + pt_end;
                         self.sel_pts[i] = null;
                     } else {
@@ -1421,12 +1507,12 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
         // record screen position of selection for touch editing (use s for
         // height in case we are calling textSize with an empty slice)
         if (self.selection.start >= self.bytes_seen and self.selection.start <= self.bytes_seen + end) {
-            const start_off = options.fontGet().textSize(txt[0..self.selection.start -| self.bytes_seen]);
+            const start_off = font.textSize(txt[0..self.selection.start -| self.bytes_seen]);
             self.sel_start_r_new = .{ .x = self.insert_pt.x + start_off.w, .y = self.insert_pt.y, .w = 1, .h = s.h };
         }
 
         if (self.selection.end >= self.bytes_seen and self.selection.end <= self.bytes_seen + end) {
-            const end_off = options.fontGet().textSize(txt[0..self.selection.end -| self.bytes_seen]);
+            const end_off = font.textSize(txt[0..self.selection.end -| self.bytes_seen]);
             self.sel_end_r_new = .{ .x = self.insert_pt.x + end_off.w, .y = self.insert_pt.y, .w = 1, .h = s.h };
         }
 
@@ -1434,7 +1520,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
             std.debug.assert(self.selection.cursor >= self.bytes_seen);
             const cursor_offset = self.selection.cursor - self.bytes_seen;
             const text_to_cursor = txt[0..cursor_offset];
-            const size = options.fontGet().textSize(text_to_cursor);
+            const size = font.textSize(text_to_cursor);
             self.cursor_rect = Rect{ .x = self.insert_pt.x + size.w, .y = self.insert_pt.y, .w = 1, .h = s.h };
 
             self.selMoveText(text_to_cursor, self.bytes_seen);
@@ -1445,7 +1531,9 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
         }
 
         { // Scope here is for deallocating rtxt before handling copying to clipboard on the arena
-            const r: Rect = .{ .x = self.insert_pt.x, .y = self.insert_pt.y, .w = s.w, .h = @min(s.h, self.data().contentRect().h - self.insert_pt.y) };
+            const max_ascent = @max(self.current_line_ascent, self.current_line_ascent_recorded);
+            const y = self.insert_pt.y + (max_ascent - ascent);
+            const r: Rect = .{ .x = self.insert_pt.x, .y = y, .w = s.w, .h = @min(s.h, self.data().contentRect().h - y) };
             const rs = self.screenRectScale(r);
             //std.debug.print("renderText: {} {s}\n", .{ rs.r, txt[0..end] });
             const rtxt = txt[0..end];
@@ -1479,6 +1567,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
                             .node_id = text_run_widget.data().id,
                             .node_parent_id = cw.accesskit.text_run_parent.?,
                             .controlling_widget_id = if (self.data().options.role.? == .none) cw.accesskit.text_run_parent.? else self.data().id,
+                            .line = self.line,
                             .char_offset = self.bytes_seen,
                         };
                     }
@@ -1487,7 +1576,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
             };
 
             dvui.renderText(.{
-                .font = options.fontGet(),
+                .font = font,
                 .text = rtxt,
                 .rs = rs,
                 .color = options.color(.text),
@@ -1558,9 +1647,13 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
 
         // move insert_pt to next line if we have more text
         if (self.newline or txt.len > 0) {
+            self.checkAscent();
+            self.line += 1;
             self.insert_pt.y += self.current_line_height;
             self.insert_pt.x = 0;
             self.current_line_height = 0;
+            self.current_line_ascent = 0;
+            self.current_line_ascent_recorded = 0;
 
             if (self.newline) {
                 const newline_size = self.data().options.padSize(.{ .w = self.current_line_width, .h = self.insert_pt.y + s.h });
@@ -1574,7 +1667,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
                 }
 
                 if (self.insert_pt.y > last_bh_height + ByteHeight.dist) {
-                    self.byte_height_ready = .{ .byte = self.bytes_seen, .height = self.insert_pt.y };
+                    self.byte_height_ready = .{ .byte = self.bytes_seen, .height = self.insert_pt.y, .line = self.line };
                 }
             } else if (txt.len > 0) {
                 self.lineBreak();
@@ -1615,10 +1708,12 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
 
 pub fn addTextDone(self: *TextLayoutWidget, opts: Options) void {
     if (self.add_text_done) {
-        dvui.log.debug("TextLayoutWidget addTextDone() called multiple times", .{});
+        dvui.log.debug("TextLayoutWidget {x} addTextDone() called multiple times", .{self.data().id});
     }
 
     self.add_text_done = true;
+
+    self.checkAscent();
 
     if (self.cache_layout and self.byte_heights.len > 0) {
         var edit_height: f32 = undefined;
@@ -1630,6 +1725,7 @@ pub fn addTextDone(self: *TextLayoutWidget, opts: Options) void {
             // height the edits gave (might be negative)
             edit_height = self.insert_pt.y - bh.height;
             const edit_bytes: i64 = @as(i64, @intCast(self.bytes_seen)) - @as(i64, @intCast(bh.byte));
+            const edit_lines: i64 = @as(i64, @intCast(self.line)) - @as(i64, @intCast(bh.line));
 
             // these are the height and bytes we are skipping
             const extra_height = self.byte_heights[self.byte_heights.len - 1].height - bh.height;
@@ -1648,10 +1744,26 @@ pub fn addTextDone(self: *TextLayoutWidget, opts: Options) void {
                 } else {
                     bhh.byte -= @intCast(-edit_bytes);
                 }
+                if (edit_lines >= 0) {
+                    bhh.line += @intCast(edit_lines);
+                } else {
+                    bhh.line -= @intCast(-edit_lines);
+                }
             }
 
             // copy all the ByteHeights we skipped, but not the final one
             self.byte_heights_new.appendSlice(dvui.currentWindow().arena(), self.byte_heights[i .. self.byte_heights.len - 1]) catch {};
+
+            var k: usize = self.line_ascents_idx;
+            while (k < self.line_ascents.len and self.line_ascents[k].line < self.line) k += 1;
+            for (self.line_ascents[k..self.line_ascents.len]) |*la| {
+                if (edit_lines >= 0) {
+                    la.line += @intCast(edit_lines);
+                } else {
+                    la.line -= @intCast(-edit_lines);
+                }
+            }
+            self.line_ascents_new.appendSlice(dvui.currentWindow().arena(), self.line_ascents[k..self.line_ascents.len]) catch {};
         } else {
             // use the final one
             var bh = &self.byte_heights[self.byte_heights.len - 1];
@@ -1674,7 +1786,7 @@ pub fn addTextDone(self: *TextLayoutWidget, opts: Options) void {
 
     const os = self.data().options;
     const contentMinSize = self.data().min_size.padNeg(os.paddingGet()).padNeg(os.borderGet()).padNeg(os.marginGet());
-    self.byte_heights_new.append(dvui.currentWindow().arena(), .{ .byte = self.bytes_seen, .height = contentMinSize.h }) catch {};
+    self.byte_heights_new.append(dvui.currentWindow().arena(), .{ .byte = self.bytes_seen, .height = contentMinSize.h, .line = self.line }) catch {};
 
     if (self.cache_layout and self.byte_heights.len > 0) {
         // sanity check
@@ -1827,6 +1939,7 @@ pub fn textRunCreateEmpty(self: *TextLayoutWidget, controlling_widget: dvui.Id, 
     dvui.currentWindow().accesskit.textRunCreateEmpty(
         vp.data().id,
         controlling_widget,
+        self.line,
         self.data().contentRectScale().rectToPhysical(empty_space),
     );
 }
@@ -1834,7 +1947,7 @@ pub fn textRunCreateEmpty(self: *TextLayoutWidget, controlling_widget: dvui.Id, 
 pub fn touchEditing(self: *TextLayoutWidget) ?*FloatingWidget {
     if (self.touch_editing and self.te_show_context_menu and self.focus_at_start and self.data().visible()) {
         self.te_floating.init(@src(), .{
-            .from = self.data().rectScale().r.topRight(),
+            .from = self.data().rectScale().r.intersect(dvui.clipGet()).topRight(),
             .from_gravity_x = 0,
             .from_gravity_y = 0,
         }, .{});
@@ -1846,7 +1959,7 @@ pub fn touchEditing(self: *TextLayoutWidget) ?*FloatingWidget {
 
 pub fn touchEditingMenu(self: *TextLayoutWidget) void {
     var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .corner_radius = dvui.ButtonWidget.defaults.themeOverride(self.wd.options.theme).corner_radiusGet(),
+        .corners = dvui.ButtonWidget.defaults.cornersGet(),
         .background = true,
         .border = dvui.Rect.all(1),
     });
@@ -1962,7 +2075,7 @@ pub fn processEvent(self: *TextLayoutWidget, e: *Event) void {
                 e.handle(@src(), self.data());
                 // capture and start drag
                 dvui.captureMouse(self.data(), e.num);
-                dvui.dragPreStart(me.p, .{ .cursor = .ibeam });
+                dvui.dragPreStart(me.button, me.p, .{ .cursor = .ibeam });
 
                 if (me.button.touch()) {
                     self.te_focus_on_touchdown = self.focus_at_start;
@@ -2208,14 +2321,16 @@ pub fn deinit(self: *TextLayoutWidget) void {
         self.addTextDone(.{});
     }
 
-    // handle mouse cursor here after all addText because some might set the cursor
-    const evts = dvui.events();
-    for (evts) |*e| {
-        if (!self.matchEvent(e))
-            continue;
+    if (self.process_events_in_deinit) {
+        // handle mouse cursor here after all addText because some might set the cursor
+        const evts = dvui.events();
+        for (evts) |*e| {
+            if (!self.matchEvent(e))
+                continue;
 
-        if (e.evt == .mouse and e.evt.mouse.action == .position) {
-            dvui.cursorSet(.ibeam);
+            if (e.evt == .mouse and e.evt.mouse.action == .position) {
+                dvui.cursorSet(.ibeam);
+            }
         }
     }
 
@@ -2233,6 +2348,7 @@ pub fn deinit(self: *TextLayoutWidget) void {
     dvui.dataSet(null, self.data().id, "_sel_end_r", self.sel_end_r);
     dvui.dataSet(null, self.data().id, "_selection", self.selection.*);
     dvui.dataSetSlice(null, self.data().id, "_byte_heights", self.byte_heights_new.items);
+    dvui.dataSetSlice(null, self.data().id, "__line_ascents", self.line_ascents_new.items);
 
     if (self.scroll_to_cursor_next_frame) {
         dvui.dataSet(null, self.data().id, "_scroll_to_cursor", true);

@@ -6,6 +6,7 @@ pub const zig_svg = @embedFile("zig-mark.svg");
 pub var show_demo_window: bool = false;
 pub var show_widgetpedia_window: bool = false;
 pub var icon_browser_show: bool = false;
+pub var stroke_test_show: bool = false;
 var source_code_show: bool = false;
 var source_code_rect: dvui.Rect = undefined;
 var frame_counter: u64 = 0;
@@ -30,6 +31,7 @@ pub const demoKind = enum {
     grid,
     struct_ui,
     debugging,
+    docking,
 
     pub fn name(self: demoKind) []const u8 {
         return switch (self) {
@@ -49,7 +51,8 @@ pub const demoKind = enum {
             .animations => "Animations",
             .struct_ui => "Struct UI",
             .debugging => "Debugging",
-            .grid => "Grid",
+            .grid => "Grid/Table",
+            .docking => "Docking",
         };
     }
 
@@ -72,6 +75,7 @@ pub const demoKind = enum {
             .struct_ui => .{ .scale = 0.45, .offset = .{} },
             .debugging => .{ .scale = 0.45, .offset = .{} },
             .grid => .{ .scale = 0.45, .offset = .{} },
+            .docking => .{ .scale = 0.45, .offset = .{} },
         };
     }
 };
@@ -80,8 +84,8 @@ pub var demo_active: demoKind = .basic_widgets;
 pub const demo_window_tag = "dvui_example_window";
 
 pub fn floatRetainClear(ptr: *anyopaque) void {
-    const id: dvui.Id = @as(*dvui.Id, @ptrCast(@alignCast(ptr))).*;
-    dvui.retainClear(id);
+    const token: dvui.data.Token = @as(*dvui.data.Token, @ptrCast(@alignCast(ptr))).*;
+    dvui.releaseAllToken(token);
 }
 
 pub const DemoInclude = enum {
@@ -105,9 +109,9 @@ pub fn demo(comptime include: DemoInclude) void {
     var float = dvui.floatingWindow(@src(), .{ .open_flag = &show_demo_window }, .{ .min_size_content = .{ .w = width, .h = 400 }, .max_size_content = .width(width), .tag = demo_window_tag });
     defer float.deinit();
 
-    _ = dvui.dataGet(null, float.data().id, "retain", dvui.Id) orelse {
-        dvui.dataSet(null, float.data().id, "retain", float.data().id);
-        dvui.dataSetDeinitFunction(null, float.data().id, "retain", &floatRetainClear);
+    _ = dvui.dataGet(null, float.data().id, "retain_token", dvui.data.Token) orelse {
+        dvui.dataSet(null, float.data().id, "retain_token", dvui.data.Token.fromId(float.data().id));
+        dvui.dataSetDeinitFunction(null, float.data().id, "retain_token", &floatRetainClear);
     };
 
     // pad the fps label so that it doesn't trigger refresh when the number
@@ -155,8 +159,8 @@ pub fn demo(comptime include: DemoInclude) void {
                 invalidate = true;
             }
         }
+        var fbox = dvui.flexbox(@src(), .{}, .{ .expand = .both, .min_size_content = .width(width), .corners = .{ .br = .theme(5), .bl = .theme(5) } });
 
-        var fbox = dvui.flexbox(@src(), .{}, .{ .expand = .both, .min_size_content = .width(width), .corner_radius = .{ .w = 5, .h = 5 } });
         defer fbox.deinit();
 
         inline for (0..@typeInfo(demoKind).@"enum".fields.len) |i| {
@@ -182,7 +186,7 @@ pub fn demo(comptime include: DemoInclude) void {
             const use_cache = true;
             var cache: *dvui.CacheWidget = undefined;
             if (use_cache) {
-                cache = dvui.cache(@src(), .{ .invalidate = invalidate, .retain = float.data().id }, .{ .expand = .both });
+                cache = dvui.cache(@src(), .{ .invalidate = invalidate, .retain = .fromId(float.data().id) }, .{ .expand = .both });
             }
             if (!use_cache or cache.uncached()) {
                 const box = dvui.box(@src(), .{}, .{ .expand = .both });
@@ -221,6 +225,7 @@ pub fn demo(comptime include: DemoInclude) void {
                     .struct_ui => if (include == .full) structUI() else {},
                     .debugging => debuggingErrors(),
                     .grid => grids(),
+                    .docking => docking(),
                 }
             }
 
@@ -286,6 +291,7 @@ pub fn demo(comptime include: DemoInclude) void {
             .struct_ui => if (include == .full) structUI() else {},
             .debugging => debuggingErrors(),
             .grid => grids(),
+            .docking => docking(),
         }
     }
 
@@ -296,10 +302,10 @@ pub fn demo(comptime include: DemoInclude) void {
     }
 
     if (icon_browser_show) {
-        icon_browser(@src(), &icon_browser_show, "entypo", entypo);
+        iconBrowser(@src(), &icon_browser_show, "entypo", entypo);
     }
 
-    if (StrokeTest.show) {
+    if (stroke_test_show) {
         show_stroke_test_window();
     }
 
@@ -329,12 +335,16 @@ pub fn dialogDirect() void {
         // Render contents to buffer so the alpha is applied a single time to the
         // whole thing
         pic = dvui.Picture.start(dialog_win.data().rectScale().r);
-    } else {
+    }
+
+    if (pic == null) {
+        render_offscreen.* = false;
         dvui.alphaSet(alpha.*);
     }
 
     // background for dialog_win (since it has background false)
-    var back = dvui.box(@src(), .{}, .{ .expand = .both, .style = .window, .background = true, .border = .all(1), .corner_radius = .all(5) });
+    var back = dvui.box(@src(), .{}, .{ .expand = .both, .style = .window, .background = true, .border = .all(1), .corners = .all(5) });
+
     defer back.deinit();
 
     dialog_win.dragAreaSet(dvui.windowHeader("Dialog", "", &show_dialog));
@@ -405,58 +415,147 @@ pub fn dialogDirect() void {
 }
 
 pub fn show_stroke_test_window() void {
-    var win = dvui.floatingWindow(@src(), .{ .rect = &StrokeTest.show_rect, .open_flag = &StrokeTest.show }, .{});
+    var win = dvui.floatingWindow(@src(), .{ .open_flag = &stroke_test_show }, .{});
     defer win.deinit();
-    win.dragAreaSet(dvui.windowHeader("Stroke Test", "", &StrokeTest.show));
+    win.dragAreaSet(dvui.windowHeader("Stroke Test", "", &stroke_test_show));
+
+    const thickness = dvui.dataGetPtrDefault(null, win.data().id, "thickness", f32, 1.0);
+    const closed = dvui.dataGetPtrDefault(null, win.data().id, "closed", bool, false);
+    const endcap = dvui.dataGetPtrDefault(null, win.data().id, "encap", dvui.Path.StrokeOptions.EndCapStyle, .none);
 
     dvui.label(@src(), "Stroke Test", .{}, .{});
-    _ = dvui.checkbox(@src(), &StrokeTest.stroke_test_closed, "Closed", .{});
+    _ = dvui.checkbox(@src(), closed, "Closed (right-click)", .{});
     {
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer hbox.deinit();
 
         dvui.label(@src(), "Endcap Style", .{}, .{});
 
-        if (dvui.radio(@src(), StrokeTest.endcap_style == .none, "None", .{})) {
-            StrokeTest.endcap_style = .none;
+        if (dvui.radio(@src(), endcap.* == .none, "None", .{})) {
+            endcap.* = .none;
         }
 
-        if (dvui.radio(@src(), StrokeTest.endcap_style == .square, "Square", .{})) {
-            StrokeTest.endcap_style = .square;
+        if (dvui.radio(@src(), endcap.* == .square, "Square", .{})) {
+            endcap.* = .square;
         }
     }
 
-    var st = StrokeTest{};
-    st.install(@src(), .{ .min_size_content = .{ .w = 400, .h = 400 }, .expand = .both });
-    st.deinit();
+    const dragi = dvui.dataGetPtrDefault(null, win.data().id, "dragi", ?usize, null);
+    var points: std.ArrayList(dvui.Point) = .empty;
+    if (dvui.dataGetSlice(null, win.data().id, "points", []dvui.Point)) |ps| points = .fromOwnedSlice(ps);
+    defer dvui.dataSetSlice(null, win.data().id, "points", points.items);
+
+    _ = dvui.sliderEntry(@src(), "thick: {d:0.2}", .{ .value = thickness }, .{ .expand = .horizontal });
+
+    var st = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = 400, .h = 400 }, .expand = .both });
+    defer st.deinit();
+
+    const rs = st.data().contentRectScale();
+    const fill_color = dvui.Color{ .r = 200, .g = 200, .b = 200, .a = 255 };
+    for (points.items, 0..) |p, i| {
+        const rect: dvui.Rect = .{ .x = p.x - 10, .y = p.y - 10, .w = 20, .h = 20 };
+        rs.rectToPhysical(rect).fill(.round(1), .{ .color = fill_color, .fade = 1.0 });
+
+        _ = i;
+        //_ = dvui.button(@src(), i, "Floating", .{}, .{ .rect = dvui.Rect.fromPoint(p) });
+    }
+
+    var builder: dvui.Path.Builder = .init(dvui.currentWindow().arena());
+    for (points.items) |p| builder.addPoint(rs.pointToPhysical(p));
+    const stroke_color = dvui.Color{ .r = 0, .g = 0, .b = 255, .a = 150 };
+    builder.build().stroke(.{ .thickness = rs.s * thickness.*, .color = stroke_color, .closed = closed.*, .endcap_style = endcap.* });
+
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, st.data())) continue;
+
+        switch (e.evt) {
+            .mouse => |me| {
+                const mp = rs.pointFromPhysical(me.p);
+                switch (me.action) {
+                    .press => {
+                        if (me.button.pointer()) {
+                            e.handle(@src(), st.data());
+                            dragi.* = null;
+
+                            for (points.items, 0..) |p, i| {
+                                const dp = me.p.diff(rs.pointToPhysical(p));
+                                if (@abs(dp.x) < 10 and @abs(dp.y) < 10) {
+                                    dragi.* = i;
+                                    break;
+                                }
+                            }
+
+                            if (dragi.* == null) {
+                                dragi.* = points.items.len;
+                                points.append(dvui.currentWindow().arena(), mp) catch @panic("OOM");
+                            } else {
+                                dvui.captureMouse(st.data(), e.num);
+                                dvui.dragPreStart(me.button, me.p, .{ .cursor = .crosshair });
+                            }
+                        }
+
+                        if (me.button == .right) {
+                            closed.* = !closed.*;
+                            dvui.refresh(null, @src(), st.data().id);
+                        }
+                    },
+                    .release => {
+                        if (me.button.pointer()) {
+                            e.handle(@src(), st.data());
+                            dvui.captureMouse(null, e.num);
+                            dvui.dragEnd();
+                        }
+                    },
+                    .motion => {
+                        e.handle(@src(), st.data());
+                        if (dvui.dragging(me.p, null)) |dps| {
+                            const dp = dps.scale(1 / rs.s, Point);
+                            if (dragi.*) |di| {
+                                points.items[di].x += dp.x;
+                                points.items[di].y += dp.y;
+                            }
+                            dvui.refresh(null, @src(), st.data().id);
+                        }
+                    },
+                    .wheel_y => |ticks| {
+                        e.handle(@src(), st.data());
+                        const base: f32 = 1.005;
+                        const zs = @exp(@log(base) * ticks);
+                        if (zs != 1.0) {
+                            thickness.* *= zs;
+                            dvui.refresh(null, @src(), st.data().id);
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
 }
 
 pub fn grids() void {
-    const GridType = enum {
+    const Type = enum {
         styling,
-        layout,
-        scrolling,
-        row_heights,
+        csv,
         selection,
-        navigation,
-        const num_grids = @typeInfo(@This()).@"enum".fields.len;
+        layout,
+        const num = @typeInfo(@This()).@"enum".fields.len;
     };
 
     const local = struct {
-        var active_grid: GridType = .styling;
+        var active: Type = .styling;
 
-        fn tabSelected(grid_type: GridType) bool {
-            return active_grid == grid_type;
+        fn tabSelected(t: Type) bool {
+            return active == t;
         }
 
-        fn tabName(grid_type: GridType) []const u8 {
-            return switch (grid_type) {
-                .styling => "Styling and\nsorting",
-                .layout => "Layouts and\ndata",
-                .scrolling => "Virtual\nscrolling",
-                .row_heights => "Variable row\nheights",
-                .selection => "Selection\n ",
-                .navigation => "Keyboard\nnavigation",
+        fn tabName(t: Type) []const u8 {
+            return switch (t) {
+                .styling => "Styling",
+                .csv => "CSV",
+                .selection => "Selection",
+                .layout => "Layout",
             };
         }
     };
@@ -466,22 +565,20 @@ pub fn grids() void {
     {
         var tabs = dvui.tabs(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer tabs.deinit();
-        for (0..GridType.num_grids) |tab_num| {
-            const this_tab: GridType = @enumFromInt(tab_num);
+        for (0..Type.num) |tab_num| {
+            const this_tab: Type = @enumFromInt(tab_num);
 
             if (tabs.addTabLabel(local.tabSelected(this_tab), local.tabName(this_tab), .{})) {
-                local.active_grid = this_tab;
+                local.active = this_tab;
             }
         }
     }
 
-    switch (local.active_grid) {
-        .styling => gridStyling(),
-        .layout => gridLayouts(),
-        .scrolling => gridVirtualScrolling(),
-        .row_heights => gridVariableRowHeights(),
-        .selection => gridSelection(),
-        .navigation => gridNavigation(),
+    switch (local.active) {
+        .styling => grid_examples.gridStyling(),
+        .csv => grid_examples.gridCSV(),
+        .selection => grid_examples.gridSelection(),
+        .layout => grid_examples.gridLayout(),
     }
 }
 
@@ -539,7 +636,7 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
                 search_entry.init(@src(), .{ .placeholder = "Search ...", .text = .{ .internal = .{ .limit = 1024 } } }, .{
                     .expand = .horizontal,
                     .margin = .{ .x = 4, .y = 4, .w = 0, .h = 0 },
-                    .corner_radius = .{ .x = 5, .y = 0, .w = 0, .h = 5 },
+                    .corners = .{ .tl = .theme(5), .bl = .theme(5) },
                     .border = .{ .x = 1, .y = 1, .w = 0, .h = 1 },
                 });
                 search_entry.processEvents();
@@ -550,17 +647,17 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
                 if (search_entry.enter_pressed) {
                     const range: Range = global.highlight_range orelse .{ .start = 0, .end = 0 };
                     const text = search_entry.getText();
-                    if (std.mem.indexOfPos(u8, global.source_code_stripped, range.end, text)) |idx| {
+                    if (std.mem.findPos(u8, global.source_code_stripped, range.end, text)) |idx| {
                         global.highlight_range = .{ .start = idx, .end = idx + text.len };
                         range_changed = true;
                     }
                 } else if (search_entry.text_changed) {
                     const range: Range = global.highlight_range orelse .{ .start = 0, .end = 0 };
                     const text = search_entry.getText();
-                    if (std.mem.indexOfPos(u8, global.source_code_stripped, range.start, text)) |idx| {
+                    if (std.mem.findPos(u8, global.source_code_stripped, range.start, text)) |idx| {
                         global.highlight_range = .{ .start = idx, .end = idx + text.len };
                         range_changed = true;
-                    } else if (std.mem.indexOf(u8, global.source_code_stripped, text)) |idx| {
+                    } else if (std.mem.find(u8, global.source_code_stripped, text)) |idx| {
                         global.highlight_range = .{ .start = idx, .end = idx + text.len };
                         range_changed = true;
                     } else {
@@ -576,7 +673,7 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
                         .background = true,
                         .margin = .{ .x = -1, .y = 4, .w = 4, .h = 4 },
                         .padding = .{ .x = 4 },
-                        .corner_radius = .{ .x = 0, .y = 5, .w = 5, .h = 0 },
+                        .corners = .{ .tr = .theme(5), .br = .theme(5) },
                         .border = .{ .x = 0, .y = 1, .w = 1, .h = 1 },
                     });
                     defer hbox_inner.deinit();
@@ -588,7 +685,7 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
                         .max_size_content = .cast(icon_size),
                     })) {
                         const range: Range = global.highlight_range orelse .{ .start = 0, .end = 0 };
-                        if (std.mem.lastIndexOf(u8, global.source_code_stripped[0..range.start], search_text)) |idx| {
+                        if (std.mem.findLast(u8, global.source_code_stripped[0..range.start], search_text)) |idx| {
                             global.highlight_range = .{ .start = idx, .end = idx + search_text.len };
                             range_changed = true;
                         }
@@ -598,7 +695,7 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
                         .max_size_content = .cast(icon_size),
                     })) {
                         const range: Range = global.highlight_range orelse .{ .start = 0, .end = 0 };
-                        if (std.mem.indexOfPos(u8, global.source_code_stripped, range.end, search_text)) |idx| {
+                        if (std.mem.findPos(u8, global.source_code_stripped, range.end, search_text)) |idx| {
                             global.highlight_range = .{ .start = idx, .end = idx + search_text.len };
                             range_changed = true;
                         }
@@ -645,7 +742,7 @@ fn displayZigSourceCode(filename: []const u8, source: []const u8, showing: *bool
         global.cursor_pos = te.textLayout.selection.cursor;
     } else {
         if (showing.*) {
-            var url: std.io.Writer.Allocating = .init(dvui.currentWindow().arena());
+            var url: std.Io.Writer.Allocating = .init(dvui.currentWindow().arena());
             url.writer.print("https://github.com/david-vanderson/dvui/blob/main/src/Examples/{s}", .{filename}) catch return;
             _ = dvui.openURL(.{ .url = url.toOwnedSlice() catch return, .new_window = false });
             showing.* = false;
@@ -690,7 +787,6 @@ test "DOCIMG demo" {
 
 const std = @import("std");
 const dvui = @import("dvui.zig");
-const StrokeTest = @import("Examples/StrokeTest.zig");
 const Options = dvui.Options;
 const Point = dvui.Point;
 const Rect = dvui.Rect;
@@ -706,6 +802,7 @@ const layout = @import("Examples/layout.zig").layout;
 const layoutText = @import("Examples/text_layout.zig").layoutText;
 const plots = @import("Examples/plots.zig").plots;
 const reorderLists = @import("Examples/reorder_tree.zig").reorderLists;
+const docking = @import("Examples/docking.zig").docking;
 const menus = @import("Examples/menus.zig").menus;
 const scrolling = @import("Examples/scrolling.zig").scrolling;
 const scrollCanvas = @import("Examples/scroll_canvas.zig").scrollCanvas;
@@ -713,13 +810,8 @@ const dialogs = @import("Examples/dialogs.zig").dialogs;
 const animations = @import("Examples/animations.zig").animations;
 const structUI = @import("Examples/struct_ui.zig").structUI;
 const debuggingErrors = @import("Examples/debugging.zig").debuggingErrors;
-const icon_browser = @import("Examples/icon_browser.zig").iconBrowser;
+pub const iconBrowser = @import("Examples/icon_browser.zig").iconBrowser;
 
 const grid_examples = @import("Examples/grid.zig");
-const gridStyling = grid_examples.gridStyling;
-const gridLayouts = grid_examples.gridLayouts;
-const gridVirtualScrolling = grid_examples.gridVirtualScrolling;
-const gridVariableRowHeights = grid_examples.gridVariableRowHeights;
-const gridSelection = grid_examples.gridSelection;
-const gridNavigation = grid_examples.gridNavigation;
+
 pub const widgetpedia = @import("Examples/widgetpedia.zig").widgetpedia;

@@ -22,7 +22,12 @@ pub var defaults: Options = .{
     // generally the top of a scroll area is against something flat (like
     // window header), and the bottom is against something curved (bottom
     // of a window)
-    .corner_radius = Rect{ .x = 0, .y = 0, .w = 5, .h = 5 },
+    .corners = .{
+        .tl = .square,
+        .tr = .square,
+        .br = .default,
+        .bl = .default,
+    },
     .style = .window,
 };
 
@@ -35,6 +40,7 @@ pub const InitOpts = struct {
     horizontal_bar: ScrollInfo.ScrollBarMode = .auto,
     focus_id: ?dvui.Id = null, // clicking on a scrollbar will focus this id, or the scroll container if null
     frame_viewport: ?dvui.Point = null,
+    frame_viewport_out: ?*dvui.Point = null,
     lock_visible: bool = false,
     process_events_after: bool = true,
     container: bool = true,
@@ -60,7 +66,7 @@ pub fn init(self: *ScrollAreaWidget, src: std.builtin.SourceLocation, init_opts:
         .hbox = undefined, // set below
     };
 
-    self.hbox.init(src, .{ .dir = .horizontal }, defaults.themeOverride(opts.theme).override(opts));
+    self.hbox.init(src, .{ .dir = .horizontal }, defaults.override(opts));
 
     if (init_opts.scroll_info) |si| {
         self.si = si;
@@ -77,6 +83,8 @@ pub fn init(self: *ScrollAreaWidget, src: std.builtin.SourceLocation, init_opts:
         self.si.vertical = init_opts.vertical orelse .auto;
         self.si.horizontal = init_opts.horizontal orelse .none;
     }
+
+    if (init_opts.frame_viewport_out) |fvo| fvo.* = self.si.viewport.topLeft();
 
     self.hbox.drawBackground();
 
@@ -170,7 +178,6 @@ pub fn init(self: *ScrollAreaWidget, src: std.builtin.SourceLocation, init_opts:
         self.scroll.?.init(@src(), self.si, .{ .scroll_area = self, .lock_visible = init_opts.lock_visible, .user_scroll = init_opts.user_scroll, .frame_viewport = init_opts.frame_viewport, .process_events_after = init_opts.process_events_after }, container_opts);
 
         self.scroll.?.processEvents();
-        self.scroll.?.processVelocity();
     }
 }
 

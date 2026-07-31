@@ -170,7 +170,7 @@ pub fn dragStart(self: *TreeWidget, branch_id: usize, p: dvui.Point.Physical) vo
     dvui.captureMouse(self.data(), 0);
     if (self.init_options.drag_name) |dn| {
         // have to call dragStart to set the drag name
-        dvui.dragStart(p, .{ .name = dn });
+        dvui.dragStart(.left, p, .{ .name = dn });
         dvui.captureMouse(null, 0);
     }
 }
@@ -319,7 +319,7 @@ pub const Branch = struct {
             dvui.parentSet(self.widget());
         }
 
-        self.button.init(@src(), .{}, wrapInner(self.options).override(.{ .expand = self.options.expand }));
+        self.button.init(@src(), .{ .touch_drag = true }, wrapInner(self.options).override(.{ .expand = self.options.expand }));
         self.button.processEvents();
         self.button.drawBackground();
         self.button.drawFocus();

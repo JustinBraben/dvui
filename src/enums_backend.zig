@@ -18,6 +18,8 @@ pub const Backend = enum {
     wio,
     /// Does no rendering!
     testing,
+    /// Forwards rendering to a host-injected bridge (plugin dylibs).
+    proxy,
 };
 
 pub const RenderBackend = enum {

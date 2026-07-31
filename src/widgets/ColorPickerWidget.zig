@@ -79,7 +79,7 @@ pub fn valueSaturationBox(src: std.builtin.SourceLocation, hsv: *Color.HSV, opts
     };
     if (texture) |tex| {
         dvui.renderTexture(tex, rs, .{
-            .corner_radius = options.corner_radiusGet(),
+            .corners = options.cornersGet(),
             .uv = .{ .x = 0.25, .y = 0.25, .w = 0.5, .h = 0.5 },
         }) catch |err| {
             dvui.logError(@src(), err, "Could not render value saturation texture", .{});
@@ -167,7 +167,7 @@ pub fn valueSaturationBox(src: std.builtin.SourceLocation, hsv: *Color.HSV, opts
         .margin = .{},
         .background = true,
         .border = .all(1),
-        .corner_radius = .all(100),
+        .corners = .all(100),
         .color_fill = hsv.toColor(),
     });
     if (b.data().id == dvui.focusedWidgetId()) {
@@ -308,7 +308,7 @@ pub fn hueSlider(src: std.builtin.SourceLocation, dir: dvui.enums.Direction, hue
     };
     if (texture) |tex| {
         dvui.renderTexture(tex, trackrs, .{
-            .corner_radius = options.corner_radiusGet(),
+            .corners = options.cornersGet(),
             .uv = .{
                 .x = uv_offset,
                 .y = if (dir == .vertical) uv_offset else 1 - uv_offset,
@@ -331,7 +331,7 @@ pub fn hueSlider(src: std.builtin.SourceLocation, dir: dvui.enums.Direction, hue
         .margin = .{},
         .background = true,
         .border = .all(1),
-        .corner_radius = .all(100),
+        .corners = .all(100),
         .color_fill = (Color.HSV{ .h = hue.* }).toColor(),
     });
     if (b.data().id == dvui.focusedWidgetId()) {
@@ -352,7 +352,7 @@ pub fn getHueSelectorTexture(dir: dvui.enums.Direction) dvui.Backend.TextureErro
             .horizontal => .{ hue_selector_colors.len, 1 },
             .vertical => .{ 1, hue_selector_colors.len },
         };
-        const texture = try dvui.textureCreate(&hue_selector_colors, width, height, .linear, .rgba_32);
+        const texture = try dvui.textureCreate(&hue_selector_colors, .{ .width = width, .height = height });
         dvui.textureAddToCache(id, texture);
         return texture;
     }
@@ -366,7 +366,7 @@ pub fn getValueSaturationTexture(hue: f32) dvui.Backend.TextureError!dvui.Textur
     if (dvui.textureGetCached(id)) |cached| return cached else {
         var pixels: [4]Color.PMA = .{ .white, .cast(Color.HSV.toColor(.{ .h = hue })), .black, .black };
         // set top right corner to the max value of that hue
-        const texture = try dvui.textureCreate(&pixels, 2, 2, .linear, .rgba_32);
+        const texture = try dvui.textureCreate(&pixels, .{ .width = 2, .height = 2 });
         dvui.textureAddToCache(id, texture);
         return texture;
     }

@@ -1,4 +1,6 @@
 var line_height_factor: f32 = 1.2;
+var underline_thick: f32 = 0.0;
+var strike_thick: f32 = 0.0;
 
 /// ![image](Examples-text_layout.png)
 pub fn layoutText() void {
@@ -8,7 +10,14 @@ pub fn layoutText() void {
 
         const show_large_doc: *bool = dvui.dataGetPtrDefault(null, box.data().id, "show_large_doc", bool, false);
 
-        _ = dvui.sliderEntry(@src(), "line height: {d:0.2}", .{ .value = &line_height_factor, .min = 0.1, .max = 2, .interval = 0.1 }, .{});
+        {
+            var vbox = dvui.box(@src(), .{}, .{});
+            defer vbox.deinit();
+
+            _ = dvui.sliderEntry(@src(), "line height: {d:0.2}", .{ .value = &line_height_factor, .min = 0.1, .max = 2, .interval = 0.1 }, .{});
+            _ = dvui.sliderEntry(@src(), "underline thick: {d:0.2}", .{ .value = &underline_thick, .min = 0.00, .max = 1.0, .interval = 0.01 }, .{});
+            _ = dvui.sliderEntry(@src(), "strike thick: {d:0.2}", .{ .value = &strike_thick, .min = 0.00, .max = 1.0, .interval = 0.01 }, .{});
+        }
 
         if (dvui.button(@src(), "Large Doc", .{}, .{ .gravity_x = 1.0 })) {
             show_large_doc.* = !show_large_doc.*;
@@ -35,7 +44,7 @@ pub fn layoutText() void {
 
                 var copies_val: f32 = @floatFromInt(copies.*);
                 if (dvui.sliderEntry(@src(), "copies: {d:0.0}", .{ .value = &copies_val, .min = 0, .max = 1000, .interval = 1 }, .{ .gravity_y = 0.5 })) {
-                    copies.* = @intFromFloat(@round(copies_val));
+                    copies.* = @trunc(copies_val);
                     cache_ok = false;
                 }
 
@@ -137,7 +146,7 @@ pub fn layoutText() void {
 
         tl.processEvents();
 
-        const fontWithLineHeight = dvui.Font.theme(.body).withLineHeight(line_height_factor);
+        const fontWithLineHeight = dvui.Font.theme(.body).withLineHeight(line_height_factor).withUnderline(.{ .thick = underline_thick }).withStrike(.{ .thick = strike_thick });
 
         tl.format("Body font is {s}\n\n", .{dvui.Font.theme(.body).familyName()}, .{});
 
@@ -150,7 +159,7 @@ pub fn layoutText() void {
                 .text = "This text is a link that is part of the text layout and goes to the dvui home page.",
                 .url = "https://david-vanderson.github.io/",
             },
-            .{ .font = fontWithLineHeight },
+            .{ .font = fontWithLineHeight.withUnderline(.{}) },
         );
 
         tl.addText(lorem2, .{ .font = fontWithLineHeight });
@@ -186,6 +195,105 @@ pub fn layoutText() void {
         tl.addText("is some ", .{ .font = dvui.Font.theme(.body).larger(6), .color_text = .{ .b = 100, .g = 100 }, .color_fill = .green });
         tl.addText("ugly text ", .{ .font = dvui.Font.theme(.body).larger(8), .color_text = .{ .r = 100, .g = 100 }, .color_fill = .teal });
         tl.addText("that shows styling.", .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .r = 100, .g = 50, .b = 50 } });
+    }
+
+    if (dvui.useTreeSitter) {
+        const global = struct {
+            extern fn tree_sitter_json() callconv(.c) *dvui.c.TSLanguage;
+        };
+
+        var log_captures = false;
+        {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer hbox.deinit();
+
+            dvui.label(@src(), "Syntax Highlight", .{}, .{ .gravity_y = 0.5 });
+
+            if (dvui.button(@src(), "Log Captures", .{}, .{ .gravity_y = 0.5, .gravity_x = 1.0 })) {
+                log_captures = true;
+            }
+        }
+
+        const source =
+            \\{ "name"   : "John Smith",
+            \\  "array"  : [true, false, null, { "sku" : 123 }],
+            \\  // comments are not part of base json
+            \\  // but supported by this parser
+            \\  "price"  : 23.95,
+            \\  /* block comment */
+            \\  "shipTo" : { "name" : "Jane Smith",
+            \\               "address" : "123 Maple Street" },
+            \\}
+        ;
+
+        // If multiple queries match, we use the last
+        // If a query matches inside another query, we drop it (like
+        // escape_sequence which is inside string)
+        const queries =
+            \\(string) @string
+            \\
+            \\(pair
+            \\  key: (_) @string.special.key)
+            \\
+            \\(number) @number
+            \\
+            \\[
+            \\  (null)
+            \\  (true)
+            \\  (false)
+            \\] @constant.builtin
+            \\
+            \\(escape_sequence) @escape
+            \\
+            \\(comment) @comment
+        ;
+
+        // If multiple highlights match, we use the last
+        const highlights: []const dvui.TextEntryWidget.SyntaxHighlight = &.{
+            .{ .name = "constant", .opts = .{ .color_text = .fromHex("87d75f") } },
+            .{ .name = "string", .opts = .{ .color_text = .fromHex("d7af5f") } },
+            .{ .name = "string.special.key", .opts = .{ .color_text = .fromHex("87afd7") } },
+            .{ .name = "comment", .opts = .{ .color_text = .fromHex("af87d7") } },
+            .{ .name = "number", .opts = .{ .color_text = .fromHex("d75f5f") } },
+        };
+
+        var tl: TextLayoutWidget = undefined;
+        tl.init(@src(), .{}, .{ .expand = .horizontal, .font = .theme(.mono) });
+        defer tl.deinit();
+
+        if (tl.touchEditing()) |floating_widget| {
+            defer floating_widget.deinit();
+            tl.touchEditingMenu();
+        }
+
+        tl.processEvents();
+
+        const ts: dvui.TreeSitter = .{
+            .language = global.tree_sitter_json(),
+            .queries = queries,
+            .highlights = highlights,
+            .log_captures = log_captures,
+        };
+
+        var iter = ts.parse(tl.data().id, "parser", source);
+        defer iter.deinit();
+
+        iter.debug = ts.log_captures;
+
+        // do this if the text changes
+        //iter.reparse(null);
+
+        if (tl.cacheLayoutBytes()) |clb| {
+            iter.setByteRange(clb.start, clb.end);
+        }
+
+        // do all matches
+        const normal_opts = tl.data().options.strip();
+        while (iter.next()) |h| {
+            tl.addText(h.text, h.opts orelse normal_opts);
+        }
+    } else {
+        dvui.label(@src(), "Syntax highlight disabled (not yet available in on web)", .{}, .{});
     }
 }
 

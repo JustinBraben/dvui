@@ -44,7 +44,7 @@ pub fn init(self: *TabsWidget, src: std.builtin.SourceLocation, init_opts: InitO
 
     self.scroll.init(src, scroll_opts, defaults.override(opts));
 
-    self.group.init(@src(), .{ .nav_key_dir = self.init_options.dir }, .{});
+    self.group.init(@src(), .{ .nav_key_dir = self.init_options.dir }, .{ .tab_index = opts.tab_index });
 
     const margin: Rect = switch (self.init_options.dir) {
         .horizontal => .{ .y = 2 },
@@ -74,7 +74,7 @@ pub fn init(self: *TabsWidget, src: std.builtin.SourceLocation, init_opts: InitO
 }
 
 pub fn addTabLabel(self: *TabsWidget, selected: bool, text: []const u8, opts: Options) bool {
-    var tab = self.addTab(selected, opts);
+    var tab = self.addTab(selected, .{}, opts);
     defer tab.deinit();
 
     var label_opts = tab.data().options.strip();
@@ -87,11 +87,17 @@ pub fn addTabLabel(self: *TabsWidget, selected: bool, text: []const u8, opts: Op
     return tab.clicked();
 }
 
-pub fn addTab(self: *TabsWidget, selected: bool, opts: Options) *ButtonWidget {
+pub const AddTabOptions = struct {
+    /// False if you want to put a button/widget inside the tab.  In that case
+    /// you must call processEvents on the returned ButtonWidget.
+    process_events: bool = true,
+};
+
+pub fn addTab(self: *TabsWidget, selected: bool, at_options: AddTabOptions, opts: Options) *ButtonWidget {
     // https://www.w3.org/TR/wai-aria/#tab
     var tab_defaults: Options = switch (self.init_options.dir) {
-        .horizontal => .{ .id_extra = self.tab_index, .background = true, .corner_radius = .{ .x = 5, .y = 5 }, .margin = .{ .x = 2, .w = 2 }, .role = .tab, .label = .{ .label_widget = .next } },
-        .vertical => .{ .id_extra = self.tab_index, .background = true, .corner_radius = .{ .x = 5, .h = 5 }, .margin = .{ .y = 2, .h = 2 }, .role = .tab, .label = .{ .label_widget = .next } },
+        .horizontal => .{ .id_extra = self.tab_index, .background = true, .corners = .{ .tl = .theme(5), .tr = .theme(5) }, .margin = .{ .x = 2, .w = 2 }, .role = .tab, .label = .{ .label_widget = .next } },
+        .vertical => .{ .id_extra = self.tab_index, .background = true, .corners = .{ .tl = .theme(5), .bl = .theme(5) }, .margin = .{ .y = 2, .h = 2 }, .role = .tab, .label = .{ .label_widget = .next } },
     };
 
     self.tab_index += 1;
@@ -115,16 +121,20 @@ pub fn addTab(self: *TabsWidget, selected: bool, opts: Options) *ButtonWidget {
         .vertical => tab_defaults.gravity_x = 1.0,
     }
 
-    const options = tab_defaults.themeOverride(opts.theme).override(opts);
+    const options = tab_defaults.override(opts);
 
     self.tab_button.init(@src(), .{}, options);
-    self.tab_button.processEvents();
+    if (at_options.process_events) {
+        self.tab_button.processEvents();
+    } else {
+        self.tab_button.processHover();
+    }
     self.tab_button.drawBackground();
 
     if (self.tab_button.focused() and self.tab_button.data().visible() and self.init_options.draw_focus) {
         const rs = self.tab_button.data().borderRectScale();
         const r = rs.r;
-        const cr = self.tab_button.data().options.corner_radiusGet();
+        const cr = self.tab_button.data().options.cornersGet().finalize(opts.theme).scale(dvui.currentWindow().natural_scale, CornerRect.Physical);
 
         switch (self.init_options.dir) {
             .horizontal => {
@@ -133,11 +143,13 @@ pub fn addTab(self: *TabsWidget, selected: bool, opts: Options) *ButtonWidget {
 
                 path.addPoint(r.bottomRight());
 
-                const tr = Point.Physical{ .x = r.x + r.w - cr.y, .y = r.y + cr.y };
-                path.addArc(tr, cr.y, math.pi * 2.0, math.pi * 1.5, false);
+                const trc = cr.tr;
+                const tr = Point.Physical{ .x = trc.rx, .y = trc.y };
+                path.addCorner(trc, r, tr, tr, .tr);
 
-                const tl = Point.Physical{ .x = r.x + cr.x, .y = r.y + cr.x };
-                path.addArc(tl, cr.x, math.pi * 1.5, math.pi, false);
+                const tlc = cr.tr;
+                const tl = Point.Physical{ .x = tlc.rx, .y = tlc.y };
+                path.addCorner(tlc, r, tl, tl, .tl);
 
                 path.addPoint(r.bottomLeft());
 
@@ -149,11 +161,13 @@ pub fn addTab(self: *TabsWidget, selected: bool, opts: Options) *ButtonWidget {
 
                 path.addPoint(r.topRight());
 
-                const tl = Point.Physical{ .x = r.x + cr.x, .y = r.y + cr.x };
-                path.addArc(tl, cr.x, math.pi * 1.5, math.pi, false);
+                const tlc = cr.tl;
+                const tl = Point.Physical{ .x = tlc.rx, .y = tlc.y };
+                path.addCorner(tlc, r, tl, tl, .tl);
 
-                const bl = Point.Physical{ .x = r.x + cr.h, .y = r.y + r.h - cr.h };
-                path.addArc(bl, cr.h, math.pi, math.pi * 0.5, false);
+                const blc = cr.bl;
+                const bl = Point.Physical{ .x = blc.rx, .y = blc.y };
+                path.addCorner(blc, r, bl, bl, .bl);
 
                 path.addPoint(r.bottomRight());
 
@@ -178,6 +192,8 @@ pub fn deinit(self: *TabsWidget) void {
 
 const Options = dvui.Options;
 const Rect = dvui.Rect;
+const CornerRect = dvui.CornerRect;
+const Corner = dvui.Corner;
 const Point = dvui.Point;
 
 const BoxWidget = dvui.BoxWidget;

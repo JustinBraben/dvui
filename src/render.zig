@@ -47,6 +47,10 @@ pub const RenderCommand = struct {
             path: Path,
             opts: Path.FillConvexOptions,
         },
+        pathFill: struct {
+            contours: []const Path,
+            opts: Path.FillOptions,
+        },
         pathStroke: struct {
             path: Path,
             opts: Path.StrokeOptions,
@@ -96,6 +100,11 @@ pub fn renderTriangles(triangles: Triangles, tex: ?Texture) Backend.GenericError
             v.pos = v.pos.diff(offset);
         }
     }
+
+    cw.render_stats.draw_calls += 1;
+    cw.render_stats.vertices +|= @intCast(triangles.vertexes.len);
+    cw.render_stats.triangles +|= @intCast(triangles.indices.len / 3);
+    if (tex != null) cw.render_stats.texture_binds += 1;
 
     try cw.backend.drawClippedTriangles(tex, triangles.vertexes, triangles.indices, clipr);
 }
@@ -170,7 +179,9 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
         // if kern_in is given, assume we already did this when measuring the text
         var utf8it = std.unicode.Utf8View.initUnchecked(utf8_text).iterator();
         while (utf8it.nextCodepoint()) |codepoint| {
-            if (codepoint != '\n') _ = try fce.glyphInfoGetOrReplacement(cw.gpa, codepoint);
+            // see halfspace below
+            const halfspace = (codepoint == '\n' or codepoint == '\r');
+            _ = try fce.glyphInfoGetOrReplacement(cw.gpa, if (halfspace) ' ' else codepoint);
         }
     }
 
@@ -190,7 +201,8 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
     var builder = try dvui.Triangles.Builder.init(cw.lifo(), 4 * utf8_text.len, 6 * utf8_text.len);
     defer builder.deinit(cw.lifo());
 
-    const col: Color.PMA = .fromColor(opts.color.opacity(cw.alpha));
+    const color = opts.color.opacity(cw.alpha);
+    const col: Color.PMA = .fromColor(color);
 
     var start = opts.p orelse opts.rs.r.topLeft();
     if (cw.snap_to_pixels) {
@@ -232,15 +244,15 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
     var i: usize = 0;
     while (i < opts.text.len) {
         const cplen = std.unicode.utf8ByteSequenceLength(opts.text[i]) catch unreachable;
-        var codepoint = std.unicode.utf8Decode(opts.text[i..][0..cplen]) catch unreachable;
+        const codepoint = std.unicode.utf8Decode(opts.text[i..][0..cplen]) catch unreachable;
 
-        // Render newlines as spaces.  That way if they are part of the
+        // Render \n, \r as half spaces.  That way if they are part of the
         // selection, you can see it. This matches Chrome's behavior, although
         // this is not a universal - Firefox doesn't do this.  Since this is
         // inside rendering, it doesn't affect text sizing.
-        if (codepoint == '\n') codepoint = ' ';
-
-        const gi = try fce.glyphInfoGetOrReplacement(cw.gpa, codepoint);
+        const halfspace = (codepoint == '\n' or codepoint == '\r');
+        var gi = try fce.glyphInfoGetOrReplacement(cw.gpa, if (halfspace) ' ' else codepoint);
+        if (halfspace) gi.advance = @round(gi.advance * 0.5);
 
         if (kerning and last_codepoint != 0 and i >= next_kern_byte) {
             const kk = fce.kern(last_codepoint, codepoint);
@@ -351,12 +363,41 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
     }
 
     if (sel) {
-        Rect.Physical.fromPoint(.{ .x = sel_start_x, .y = opts.rs.r.y })
+        Rect.Physical.fromPoint(.{ .x = sel_start_x, .y = start.y })
             .toPoint(.{
                 .x = sel_end_x,
-                .y = @max(sel_max_y, opts.rs.r.y + fce.height * target_fraction * opts.font.line_height_factor),
+                .y = @max(sel_max_y, start.y + fce.height * target_fraction * opts.font.line_height_factor),
             })
             .fill(.{}, .{ .color = opts.sel_color orelse dvui.themeGet().focus, .fade = 0 });
+    }
+
+    if (opts.font.underline) |u| {
+        if (u.thick > 0) {
+            var topleft: dvui.Point.Physical = .{ .x = start.x, .y = start.y + fce_ascent + (fce.em_height * 0.2) };
+            if (cw.snap_to_pixels) {
+                // x should already be snapped
+                topleft.y = @round(topleft.y);
+            }
+
+            const botright: dvui.Point.Physical = .{ .x = max_x, .y = topleft.y + @max(1.0 * opts.rs.s, fce.em_height * u.thick) };
+
+            Rect.Physical.fromPoint(topleft).toPoint(botright).fill(.{}, .{ .color = color, .fade = 0 });
+        }
+    }
+
+    if (opts.font.strike) |s| {
+        if (s.thick > 0) {
+            const thick = @max(1.0 * opts.rs.s, fce.em_height * s.thick);
+            var topleft: dvui.Point.Physical = .{ .x = start.x, .y = start.y + fce_ascent - (fce.em_height * 0.5) - thick * 0.5 };
+            if (cw.snap_to_pixels) {
+                // x should already be snapped
+                topleft.y = @round(topleft.y);
+            }
+
+            const botright: dvui.Point.Physical = .{ .x = max_x, .y = topleft.y + thick };
+
+            Rect.Physical.fromPoint(topleft).toPoint(botright).fill(.{}, .{ .color = color, .fade = 0 });
+        }
     }
 
     var tri = builder.build();
@@ -374,8 +415,9 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
 pub const TextureOptions = struct {
     rotation: f32 = 0,
     colormod: Color = .{},
-    corner_radius: Rect = .{},
+    corners: CornerRect = .{},
     uv: Rect = .{ .w = 1, .h = 1 },
+    uv_rect: ?Rect.Physical = null,
     background_color: ?Color = null,
     debug: bool = false,
 
@@ -405,12 +447,13 @@ pub fn renderTexture(tex: Texture, rs: RectScale, opts: TextureOptions) Backend.
     var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
     defer path.deinit();
 
-    path.addRect(rect, opts.corner_radius.scale(rs.s, Rect.Physical));
+    path.addRect(rect, opts.corners.scale(rs.s, CornerRect.Physical));
 
     var triangles = try path.build().fillConvexTriangles(cw.lifo(), .{ .color = opts.colormod.opacity(cw.alpha), .fade = opts.fade });
     defer triangles.deinit(cw.lifo());
 
-    triangles.uvFromRectuv(rect, opts.uv);
+    const uvRect = opts.uv_rect orelse rect;
+    triangles.uvFromRectuv(uvRect, opts.uv);
     triangles.rotate(rect.center(), opts.rotation);
 
     if (opts.background_color) |bg_col| {
@@ -431,26 +474,17 @@ pub fn renderIcon(name: []const u8, tvg_bytes: []const u8, rs: RectScale, opts: 
     if (rs.s == 0) return;
     if (dvui.clipGet().intersect(rs.r).empty()) return;
 
-    // Ask for an integer size icon, then render it to fit rs
-    const target_size = rs.r.h;
-    const ask_height = @ceil(target_size);
+    if (comptime !dvui.useTvg) {
+        try renderText(.{
+            .font = (dvui.Options{}).fontGet().withSize(0.5 * rs.r.h / rs.s),
+            .text = name,
+            .rs = rs,
+            .color = (dvui.Options{}).color(.text),
+        });
+        return;
+    }
 
-    var h = dvui.fnv.init();
-    h.update(std.mem.asBytes(&tvg_bytes.ptr));
-    h.update(std.mem.asBytes(&ask_height));
-    h.update(std.mem.asBytes(&icon_opts));
-    const hash = h.final();
-
-    const texture = dvui.textureGetCached(hash) orelse blk: {
-        const texture = Texture.fromTvgFile(name, tvg_bytes, @intFromFloat(ask_height), icon_opts) catch |err| {
-            dvui.logError(@src(), err, "Could not create texture from tvg file \"{s}\"", .{name});
-            return;
-        };
-        dvui.textureAddToCache(hash, texture);
-        break :blk texture;
-    };
-
-    try renderTexture(texture, rs, opts);
+    try dvui.render_tvg.renderIcon(name, tvg_bytes, rs, opts, icon_opts);
 }
 
 /// Calls `renderTexture` with the texture created from `source`
@@ -711,6 +745,7 @@ const Font = dvui.Font;
 const Color = dvui.Color;
 const Point = dvui.Point;
 const Size = dvui.Size;
+const CornerRect = dvui.CornerRect;
 const Rect = dvui.Rect;
 const RectScale = dvui.RectScale;
 const Triangles = dvui.Triangles;

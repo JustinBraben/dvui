@@ -42,19 +42,15 @@ pub fn basicWidgets() void {
             defer vbox.deinit();
 
             {
-                const control_opts: dvui.Options = .{};
-                var color: ?dvui.Color = null;
-                if (checkbox_gray) {
-                    // blend text and control colors
-                    color = dvui.Color.average(control_opts.color(.text), control_opts.color(.fill));
-                }
                 var bw: dvui.ButtonWidget = undefined;
-                bw.init(@src(), .{}, .{
-                    .color_text = color,
+                bw.init(@src(), .{ .grayed = checkbox_gray }, .{
                     // If not enabled don't include in tab order (tab_index = 0). Otherwise use default tab index (tab_index = null).
                     .tab_index = if (checkbox_enabled) null else 0,
                 });
                 defer bw.deinit();
+                if (checkbox_gray) {
+                    dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r }, "Button is grayed", .{}, .{});
+                }
                 if (checkbox_enabled)
                     bw.processEvents();
                 bw.drawBackground();
@@ -142,16 +138,16 @@ pub fn basicWidgets() void {
             _ = dvui.slider(@src(), .{ .fraction = &slider_val }, .{
                 .expand = .horizontal,
                 .gravity_y = 0.5,
-                .corner_radius = dvui.Rect.all(100),
+                .corners = .all(100),
                 .label = .{ .text = "Sliders1" },
             });
             _ = dvui.slider(@src(), .{ .dir = .vertical, .fraction = &slider_val }, .{
                 .expand = .vertical,
                 .min_size_content = .{ .w = 10 },
-                .corner_radius = dvui.Rect.all(100),
+                .corners = .all(100),
                 .label = .{ .text = "Sliders2" },
             });
-            dvui.label(@src(), "Value: {d:2.2}", .{slider_val}, .{ .gravity_y = 0.5 });
+            dvui.label(@src(), "Value: {d:2.2}", .{slider_val}, .{ .gravity_y = 0.5, .min_size_content = dvui.themeGet().font_body.sizeM(8, 1) });
         }
 
         {
@@ -214,16 +210,20 @@ pub fn basicWidgets() void {
 
         dvui.label(@src(), "Svg Images", .{}, .{ .gravity_y = 0.5 });
 
-        const zig_tvg_bytes = if (dvui.dataGetSlice(null, hbox.data().id, "_zig_tvg", []u8)) |tvg| tvg else blk: {
-            // Could fail on OutOfMemory, but then the dataGetSlice would also panic
-            const zig_tvg_bytes = dvui.svgToTvg(dvui.currentWindow().arena(), zig_svg) catch unreachable;
-            defer dvui.currentWindow().arena().free(zig_tvg_bytes);
-            dvui.dataSetSlice(null, hbox.data().id, "_zig_tvg", zig_tvg_bytes);
-            break :blk dvui.dataGetSlice(null, hbox.data().id, "_zig_tvg", []u8).?;
-        };
+        if (dvui.useTvg) {
+            const zig_tvg_bytes = if (dvui.dataGetSlice(null, hbox.data().id, "_zig_tvg", []u8)) |tvg| tvg else blk: {
+                // Could fail on OutOfMemory, but then the dataGetSlice would also panic
+                const zig_tvg_bytes = dvui.svgToTvg(dvui.currentWindow().arena(), zig_svg) catch unreachable;
+                defer dvui.currentWindow().arena().free(zig_tvg_bytes);
+                dvui.dataSetSlice(null, hbox.data().id, "_zig_tvg", zig_tvg_bytes);
+                break :blk dvui.dataGetSlice(null, hbox.data().id, "_zig_tvg", []u8).?;
+            };
 
-        const icon_opts = dvui.Options{ .gravity_y = 0.5, .min_size_content = .{ .h = 16 + icon_image_size_extra }, .rotation = icon_image_rotation };
-        dvui.icon(@src(), "zig favicon", zig_tvg_bytes, .{}, icon_opts);
+            const icon_opts = dvui.Options{ .gravity_y = 0.5, .min_size_content = .{ .h = 16 + icon_image_size_extra }, .rotation = icon_image_rotation };
+            dvui.icon(@src(), "zig favicon", zig_tvg_bytes, .{}, icon_opts);
+        } else {
+            dvui.label(@src(), "Disabled because -Dtvg=false", .{}, .{ .gravity_y = 0.5 });
+        }
     }
 
     {

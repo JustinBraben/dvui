@@ -115,7 +115,7 @@ pub fn scrollCanvas() void {
             .background = true,
             .style = .window,
             .border = .{ .h = 1, .w = 1, .x = 1, .y = 1 },
-            .corner_radius = .{ .h = 5, .w = 5, .x = 5, .y = 5 },
+            .corners = .all(5),
             .color_border = if (dragging_box) dvui.themeGet().focus else null,
             .box_shadow = .{},
         });
@@ -127,7 +127,13 @@ pub fn scrollCanvas() void {
             mbbox = boxRect;
         }
 
-        dvui.label(@src(), "Box {d} {d:0>3.0}x{d:0>3.0}", .{ i, b.x, b.y }, .{});
+        // This label controls the size of the box, but when zooming the box
+        // will use last frame's min size.  That means the label this frame
+        // might be slightly larger so will ellipsize.  We could turn that off
+        // with labelEx, but here we'll add extra space.
+        var label_wd: dvui.WidgetData = undefined;
+        dvui.label(@src(), "Box {d} {d:0>3.0}x{d:0>3.0}", .{ i, b.x, b.y }, .{ .data_out = &label_wd });
+        dragBox.data().minSizeMax(dragBox.data().options.padSize(label_wd.min_size.pad(.{ .w = 10 })));
 
         {
             var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
@@ -185,7 +191,7 @@ pub fn scrollCanvas() void {
                             if (me.action == .press and me.button.pointer()) {
                                 e.handle(@src(), dbox.data());
                                 dvui.captureMouse(dbox.data(), e.num);
-                                dvui.dragPreStart(me.p, .{ .name = "box_transfer" });
+                                dvui.dragPreStart(me.button, me.p, .{ .name = "box_transfer" });
                             } else if (me.action == .release and me.button.pointer()) {
                                 if (dvui.captured(dbox.data().id)) {
                                     // mouse up before drag started
@@ -224,7 +230,7 @@ pub fn scrollCanvas() void {
                         e.handle(@src(), dragBox.data());
                         dvui.captureMouse(dragBox.data(), e.num);
                         const offset = me.p.diff(dragBox.data().rectScale().r.topLeft()); // pixel offset from dragBox corner
-                        dvui.dragPreStart(me.p, .{ .offset = offset });
+                        dvui.dragPreStart(me.button, me.p, .{ .offset = offset });
                     } else if (me.action == .release and me.button.pointer()) {
                         if (dvui.captured(dragBox.data().id)) {
                             e.handle(@src(), dragBox.data());
@@ -273,7 +279,7 @@ pub fn scrollCanvas() void {
                             dvui.cursorSet(.crosshair);
                             // the drag is hovered above us, draw to indicate that
                             const rs = dragBox.data().contentRectScale();
-                            rs.r.fill(dragBox.data().options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .color = dvui.themeGet().focus.opacity(0.2) });
+                            rs.r.fill(dragBox.data().options.cornersGet().scale(rs.s, CornerRect.Physical), .{ .color = dvui.themeGet().focus.opacity(0.2) });
                         }
                     },
                     else => {},
@@ -298,7 +304,7 @@ pub fn scrollCanvas() void {
                 if (me.action == .press and me.button.pointer()) {
                     e.handle(@src(), scrollContainer.data());
                     dvui.captureMouse(scrollContainer.data(), e.num);
-                    dvui.dragPreStart(me.p, .{});
+                    dvui.dragPreStart(me.button, me.p, .{});
                 } else if (me.action == .release and me.button.pointer()) {
                     if (dvui.captured(scrollContainer.data().id)) {
                         e.handle(@src(), scrollContainer.data());
@@ -321,7 +327,7 @@ pub fn scrollCanvas() void {
                     }
                 } else if (me.action == .wheel_y and me.mod.matchBind("ctrl/cmd")) {
                     e.handle(@src(), scrollContainer.data());
-                    const base: f32 = 1.01;
+                    const base: f32 = 1.005;
                     const zs = @exp(@log(base) * me.action.wheel_y);
                     if (zs != 1.0) {
                         zoom *= zs;
@@ -365,7 +371,7 @@ pub fn scrollCanvas() void {
     // when starting out)
     if (!scroll_info.viewport.empty()) {
         // add current viewport plus padding
-        const pad = 60;
+        const pad = 100;
         var bbox = scroll_info.viewport.outsetAll(pad);
         if (mbbox) |bb| {
             // convert bb from screen space to viewport space
@@ -432,4 +438,5 @@ const dvui = @import("../dvui.zig");
 const entypo = dvui.entypo;
 const Point = dvui.Point;
 const Rect = dvui.Rect;
+const CornerRect = dvui.CornerRect;
 const ScrollInfo = dvui.ScrollInfo;
