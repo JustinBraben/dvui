@@ -1,14 +1,16 @@
 const std = @import("std");
 const dvui = @import("dvui");
-const WioBackend = @import("wio-backend");
-const wio = WioBackend.wio;
+const SDLBackend = @import("sdl-backend");
+const c = SDLBackend.c;
 const vk = dvui.render_backend.vulkan;
+
+comptime {
+    std.debug.assert(@hasDecl(SDLBackend, "SDLBackend"));
+}
 
 const vsync = true;
 const show_demo = false;
 var stats_rect: dvui.Rect = .{ .x = 440, .y = 20, .w = 340, .h = 430 };
-var transfer_queue_family: ?u32 = null;
-var transfer_queue_index: u32 = 0;
 
 /// The application owns this pipeline and records the spinning cube before
 /// DVUI appends its floating-window draw commands to the same rendering scope.
@@ -210,6 +212,7 @@ pub fn main(init: std.process.Init) !void {
     if (@import("builtin").os.tag == .windows) {
         dvui.Backend.Common.windowsAttachConsole() catch {};
     }
+    SDLBackend.enableSDLLogging();
     dvui.Examples.show_demo_window = show_demo;
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -225,25 +228,19 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try wio.init(.{ .allocator = init.gpa, .io = init.io, .eventFn = wio.EventQueue.eventFn });
-    defer wio.deinit();
-
-    var events: wio.EventQueue = .empty;
-    defer events.deinit();
-
-    var window = try wio.Window.create(.{
-        .event_fn_data = &events,
+    // SDL creates and owns the OS window; it has no SDL_Renderer since the
+    // Vulkan render backend does all drawing.
+    var backend = try SDLBackend.initVulkanWindow(.{
+        .io = init.io,
         .title = if (use_dynamic_rendering)
-            "DVUI wio Vulkan Ontop Example (dynamic rendering)"
+            "DVUI SDL3 Vulkan Ontop Example (dynamic rendering)"
         else
-            "DVUI wio Vulkan Ontop Example (render pass)",
-        .size = .{ .width = 800, .height = 600 },
-        .scale = 1,
+            "DVUI SDL3 Vulkan Ontop Example (render pass)",
+        .size = .{ .w = 800, .h = 600 },
     });
-    defer window.destroy();
-    window.enableDrawAvailableEvents();
+    defer backend.deinit();
 
-    var renderer = try dvui.render_backend.init(init.gpa, &WioBackend.VulkanWindow{ .window = &window }, .{
+    var renderer = try dvui.render_backend.init(init.gpa, &SDLBackend.VulkanWindow{ .window = backend.window }, .{
         .size_physical = .{ .w = 800, .h = 600 },
         .vsync = vsync,
         .api_version = if (use_dynamic_rendering) vk.API_VERSION_1_3 else vk.API_VERSION_1_2,
@@ -255,32 +252,18 @@ pub fn main(init: std.process.Init) !void {
     var scene = try Scene.init(&renderer);
     defer scene.deinit();
 
-    var backend = try WioBackend.init(.{
-        .io = init.io,
-        .window = window,
-        .size_logical = .{ .width = 800, .height = 600 },
-        .size_physical = .{ .width = 800, .height = 600 },
-    });
-    defer backend.deinit();
-
-    var win = try dvui.Window.init(@src(), init.gpa, backend.backend(&renderer), .{});
+    var win = try dvui.Window.init(@src(), init.gpa, backend.backendWithRenderer(&renderer), .{});
     defer win.deinit();
 
     const start_ns = backend.nanoTime();
     main_loop: while (true) {
-        wio.update();
-        var draw_available = false;
-        while (events.pop()) |event| {
-            switch (event) {
-                .draw => draw_available = true,
-                .close => break :main_loop,
+        var event: c.SDL_Event = undefined;
+        while (c.SDL_PollEvent(&event)) {
+            switch (event.type) {
+                c.SDL_EVENT_QUIT => break :main_loop,
                 else => {},
             }
             _ = try backend.addEvent(&win, event);
-        }
-        if (!draw_available and renderer.vsyncEnabled()) { // for smooth resize
-            backend.waitEventTimeout(std.time.ns_per_ms * 100);
-            continue;
         }
 
         // Application rendering comes first.

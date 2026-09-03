@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) !void {
     const render_backend = b.option(RenderBackend, "renderer", "Render backend to build (default: implied by backend)") orelse .default;
     if (render_backend == .vulkan) {
         if (back_to_build) |backend| {
-            if (backend != .wio and backend != .custom) @panic("the Vulkan render backend currently supports -Dbackend=wio or -Dbackend=custom");
+            if (backend != .wio and backend != .custom and backend != .sdl3) @panic("the Vulkan render backend currently supports -Dbackend=wio, -Dbackend=sdl3, or -Dbackend=custom");
         } else {
             back_to_build = .wio;
         }
@@ -711,11 +711,19 @@ pub fn buildBackend(
                     .backend_name = "sdl-backend",
                     .backend_mod = sdl_mod,
                 };
-                _ = addExample("sdl3-standalone", b.path("examples/sdl-standalone.zig"), true, example_opts, dvui_opts);
-                _ = addExample("sdl3-ontop", b.path("examples/sdl-ontop.zig"), true, example_opts, dvui_opts);
-                _ = addExample("sdl3-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
-                _ = addExample("sdl3-multi-win", b.path("examples/sdl-multi-win.zig"), true, example_opts, dvui_opts);
-                _ = addExample("sdl3-docking", b.path("examples/docking-standalone.zig"), true, example_opts, dvui_opts);
+                if (dvui_opts.render_backend == .vulkan) {
+                    // These examples use the SDL_Renderer-owning constructors and
+                    // the single-arg `backend()`, which aren't compatible with an
+                    // external (Vulkan) render backend.
+                    _ = addExample("sdl3-vulkan-standalone", b.path("examples/sdl-vulkan-standalone.zig"), true, example_opts, dvui_opts);
+                    _ = addExample("sdl3-vulkan-ontop", b.path("examples/sdl-vulkan-ontop.zig"), true, example_opts, dvui_opts);
+                } else {
+                    _ = addExample("sdl3-standalone", b.path("examples/sdl-standalone.zig"), true, example_opts, dvui_opts);
+                    _ = addExample("sdl3-ontop", b.path("examples/sdl-ontop.zig"), true, example_opts, dvui_opts);
+                    _ = addExample("sdl3-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
+                    _ = addExample("sdl3-multi-win", b.path("examples/sdl-multi-win.zig"), true, example_opts, dvui_opts);
+                    _ = addExample("sdl3-docking", b.path("examples/docking-standalone.zig"), true, example_opts, dvui_opts);
+                }
             }
         },
         .raylib => {
@@ -1334,7 +1342,6 @@ pub fn addDvuiModule(
                 (b.lazyDependency("vulkan_headers", .{}) orelse return dvui_mod).path("registry/vk.xml");
             const vulkan = b.lazyDependency("vulkan", .{ .registry = registry }) orelse return dvui_mod;
             renderer_mod.addImport("vk", vulkan.module("vulkan-zig"));
-            renderer_mod.addImport("wio", opts.wio_module orelse @panic("Vulkan renderer requires the wio module"));
         },
     }
     renderer_mod.addImport("dvui", dvui_mod);

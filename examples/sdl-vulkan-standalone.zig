@@ -1,85 +1,62 @@
 const std = @import("std");
 const dvui = @import("dvui");
-const WioBackend = @import("wio-backend");
-const wio = WioBackend.wio;
+const SDLBackend = @import("sdl-backend");
 
 comptime {
-    std.debug.assert(@hasDecl(WioBackend, "wio"));
+    std.debug.assert(@hasDecl(SDLBackend, "SDLBackend"));
 }
 
 const vsync = true;
 const show_demo = false;
 var scale_val: f32 = 1.0;
 
-var g_win: ?*dvui.Window = null;
-
-/// This example shows how to use dvui with the wio backend for a normal
-/// application, driving the wio main loop manually (rather than via dvui.App):
+/// This example shows how to use dvui with the SDL3 backend and the Vulkan
+/// renderer for a normal application, driving the SDL main loop manually
+/// (rather than via dvui.App):
 /// - dvui renders the whole application
 /// - render frames only when needed
 ///
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
-    const io = init.io;
-
+    if (@import("builtin").os.tag == .windows) {
+        dvui.Backend.Common.windowsAttachConsole() catch {};
+    }
+    SDLBackend.enableSDLLogging();
     dvui.Examples.show_demo_window = show_demo;
 
-    try wio.init(.{ .allocator = gpa, .io = io, .eventFn = wio.EventQueue.eventFn });
-    defer wio.deinit();
-
-    var events: wio.EventQueue = .empty;
-    defer events.deinit();
-
-    // wio creates and owns the OS window.
-    var window = try wio.Window.create(.{
-        .event_fn_data = &events,
-        .title = "DVUI wio Vulkan Standalone Example",
-        .size = .{ .width = 800, .height = 600 },
-        .scale = 1,
+    // SDL creates and owns the OS window; it has no SDL_Renderer since the
+    // Vulkan render backend does all drawing.
+    var backend = try SDLBackend.initVulkanWindow(.{
+        .io = init.io,
+        .title = "DVUI SDL3 Vulkan Standalone Example",
+        .size = .{ .w = 800, .h = 600 },
+        .min_size = .{ .w = 250, .h = 350 },
     });
-    defer window.destroy();
-    window.enableDrawAvailableEvents();
+    defer backend.deinit();
 
     // The renderer owns the Vulkan instance, device, surface, and swapchain.
-    var renderer = try dvui.render_backend.init(gpa, &WioBackend.VulkanWindow{ .window = &window }, .{
+    var renderer = try dvui.render_backend.init(init.gpa, &SDLBackend.VulkanWindow{ .window = backend.window }, .{
         .size_physical = .{ .w = 800, .h = 600 },
         .vsync = vsync,
     });
     defer renderer.deinit();
 
-    // init the wio backend (wraps the wio window for dvui)
-    var backend = try WioBackend.init(.{ .io = io, .window = window });
-    defer backend.deinit();
-
     var window_open = true;
-    // init dvui Window (maps onto a single OS window)
-    var win = try dvui.Window.init(@src(), gpa, backend.backend(&renderer), .{
+    var win = try dvui.Window.init(@src(), init.gpa, backend.backendWithRenderer(&renderer), .{
         .open_flag = &window_open,
     });
     defer win.deinit();
-    g_win = &win;
+
+    var interrupted = false;
 
     main_loop: while (window_open) {
-        // pump the OS event queue, then forward all wio events to dvui
-        wio.update();
-        var draw_available = false;
-        while (events.pop()) |event| {
-            switch (event) {
-                .draw => draw_available = true,
-                else => _ = try backend.addEvent(&win, event),
-            }
-        }
-        if (!draw_available) { // for smooth resize
-            backend.waitEventTimeout(std.time.ns_per_ms * 100);
-            continue;
-        }
-
         // beginWait coordinates with waitTime below to run frames only when needed
-        const nstime = win.beginWait(true);
+        const nstime = win.beginWait(interrupted);
 
         // marks the beginning of a frame for dvui, can call dvui functions after this
         try win.begin(nstime);
-        renderer.clear();
+
+        // send all SDL events to dvui for processing
+        try backend.addAllEvents(&win);
 
         const keep_running = gui_frame();
         if (!keep_running) break :main_loop;
@@ -90,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
 
         // waitTime and beginWait combine to achieve variable framerates
         const wait_event_micros = win.waitTime(end_micros);
-        backend.waitEventTimeout(wait_event_micros);
+        interrupted = try backend.waitEventTimeout(wait_event_micros);
     }
 }
 
@@ -121,7 +98,7 @@ fn gui_frame() bool {
     defer scroll.deinit();
 
     var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .font = .theme(.title) });
-    tl.addText("This example shows how to use dvui with the wio Vulkan backend in a normal application.", .{});
+    tl.addText("This example shows how to use dvui with the SDL3 Vulkan backend in a normal application.", .{});
     tl.deinit();
 
     var tl2 = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal });

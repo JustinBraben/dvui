@@ -25,7 +25,9 @@ io: std.Io,
 arena: std.mem.Allocator = undefined,
 
 window: *c.SDL_Window,
-renderer: *c.SDL_Renderer,
+/// Null when using an external (non-SDL_Renderer) render backend such as
+/// Vulkan; see `initVulkanWindow`.
+renderer: ?*c.SDL_Renderer,
 
 /// Optional hook invoked during `Window.begin` just before pixel/window sizes are queried.
 /// Useful to sync AppKit window state into SDL (e.g. during Space / zoom animations).
@@ -495,6 +497,81 @@ pub fn init(io: std.Io, window: *c.SDL_Window, renderer: *c.SDL_Renderer) SDLBac
     return SDLBackend{ .io = io, .window = window, .renderer = renderer };
 }
 
+pub const VulkanInitOptions = struct {
+    io: std.Io,
+    title: [:0]const u8,
+    size: dvui.Size,
+    min_size: ?dvui.Size = null,
+    max_size: ?dvui.Size = null,
+};
+
+/// Creates an SDL3 window flagged for Vulkan rendering, with no `SDL_Renderer`.
+/// Compose the result with the Vulkan render backend via `backendWithRenderer`
+/// and `VulkanWindow`.
+pub fn initVulkanWindow(options: VulkanInitOptions) !SDLBackend {
+    if (!sdl3) return error.VulkanRequiresSdl3;
+    try initSDL();
+
+    const props = c.SDL_CreateProperties();
+    defer c.SDL_DestroyProperties(props);
+
+    const flags: c.SDL_WindowFlags = @intCast(c.SDL_WINDOW_VULKAN | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | c.SDL_WINDOW_RESIZABLE);
+    try toErr(c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, options.title), "SDL_SetStringProperty in initVulkanWindow");
+    try toErr(c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, @as(c_int, @trunc(options.size.w))), "SDL_SetNumberProperty in initVulkanWindow");
+    try toErr(c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, @as(c_int, @trunc(options.size.h))), "SDL_SetNumberProperty in initVulkanWindow");
+    try toErr(c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, @intCast(flags)), "SDL_SetNumberProperty in initVulkanWindow");
+
+    const window = c.SDL_CreateWindowWithProperties(props) orelse return logErr("SDL_CreateWindowWithProperties in initVulkanWindow");
+    errdefer c.SDL_DestroyWindow(window);
+
+    if (options.min_size) |size| {
+        try toErr(c.SDL_SetWindowMinimumSize(window, @as(c_int, @trunc(size.w)), @as(c_int, @trunc(size.h))), "SDL_SetWindowMinimumSize in initVulkanWindow");
+    }
+    if (options.max_size) |size| {
+        try toErr(c.SDL_SetWindowMaximumSize(window, @as(c_int, @trunc(size.w)), @as(c_int, @trunc(size.h))), "SDL_SetWindowMaximumSize in initVulkanWindow");
+    }
+
+    try toErr(c.SDL_Vulkan_LoadLibrary(null), "SDL_Vulkan_LoadLibrary in initVulkanWindow");
+
+    dvui.io = options.io;
+    if (sdl3 and builtin.os.tag.isDarwin()) {
+        dvui_macos_monitor_install();
+    }
+    return SDLBackend{ .io = options.io, .window = window, .renderer = null, .we_own_window = true };
+}
+
+/// Adapts an SDL3 Vulkan-flagged window (see `initVulkanWindow`) to the
+/// window-adapter contract required by `dvui.render_backend.init` when the
+/// Vulkan renderer is in use.
+pub const VulkanWindow = struct {
+    window: *c.SDL_Window,
+
+    const PFN_vkGetInstanceProcAddr = *const fn (instance: ?*const anyopaque, name: [*:0]const u8) callconv(.c) ?*const anyopaque;
+
+    pub fn vkGetRequiredInstanceExtensions() []const [*:0]const u8 {
+        var count: u32 = 0;
+        const extensions = c.SDL_Vulkan_GetInstanceExtensions(&count) orelse return &.{};
+        return @as([*]const [*:0]const u8, @ptrCast(extensions))[0..count];
+    }
+
+    pub fn vkGetInstanceProcAddr(instance: usize, name: [*:0]const u8) ?*const anyopaque {
+        const loader: PFN_vkGetInstanceProcAddr = @ptrCast(c.SDL_Vulkan_GetVkGetInstanceProcAddr());
+        return loader(if (instance == 0) null else @ptrFromInt(instance), name);
+    }
+
+    pub fn vkCreateSurface(self: @This(), instance: usize, vk_alloc: ?*const anyopaque, surface: *u64) !void {
+        var surface_handle: c.VkSurfaceKHR = undefined;
+        const ok = c.SDL_Vulkan_CreateSurface(
+            self.window,
+            @ptrFromInt(instance),
+            @ptrCast(@alignCast(vk_alloc)),
+            &surface_handle,
+        );
+        if (!ok) return logErr("SDL_Vulkan_CreateSurface in vkCreateSurface");
+        surface.* = @intFromPtr(surface_handle);
+    }
+};
+
 extern "c" fn dvui_macos_monitor_install() void;
 extern "c" fn dvui_macos_monitor_last_scroll_precise() c_int;
 
@@ -836,7 +913,7 @@ pub fn deinit(self: *SDLBackend) void {
                 WindowGeometry.save(self);
             }
         }
-        c.SDL_DestroyRenderer(self.renderer);
+        if (self.renderer) |r| c.SDL_DestroyRenderer(r);
         c.SDL_DestroyWindow(self.window);
         if (self.sdl_quit) {
             c.SDL_Quit();
@@ -846,16 +923,28 @@ pub fn deinit(self: *SDLBackend) void {
 }
 
 pub fn renderPresent(self: *SDLBackend) void {
+    const renderer = self.renderer orelse return;
     if (sdl3) {
-        toErr(c.SDL_RenderPresent(self.renderer), "SDL_RenderPresent in renderPresent") catch {};
+        toErr(c.SDL_RenderPresent(renderer), "SDL_RenderPresent in renderPresent") catch {};
     } else {
-        c.SDL_RenderPresent(self.renderer);
+        c.SDL_RenderPresent(renderer);
     }
     self.manage_backend_tracking.check(.renderPresent);
 }
 
 pub fn backend(self: *SDLBackend) dvui.Backend {
     return dvui.Backend.init(self);
+}
+
+/// Compose this windowing-only backend with an external render backend (e.g.
+/// the Vulkan renderer). Use with `initVulkanWindow`, which leaves `renderer`
+/// null. Only meaningful when `-Drenderer` selects a non-default render
+/// backend.
+pub fn backendWithRenderer(self: *SDLBackend, renderer: *dvui.render_backend) dvui.Backend {
+    if (dvui.render_backend.kind == .default) {
+        return dvui.Backend.init(self);
+    }
+    return .init(self, renderer);
 }
 
 pub fn nanoTime(self: *SDLBackend) i128 {
@@ -928,27 +1017,30 @@ pub fn begin(self: *SDLBackend, arena: std.mem.Allocator) !void {
     if (self.begin_hook) |hook| hook(self);
     if (self.clear_window_on_begin) try self.clearWindow();
     const size = self.pixelSize();
-    if (sdl3) {
-        try toErr(c.SDL_SetRenderClipRect(self.renderer, &c.SDL_Rect{
-            .x = 0,
-            .y = 0,
-            .w = @trunc(size.w),
-            .h = @trunc(size.h),
-        }), "SDL_SetRenderClipRect in begin");
-    } else {
-        try toErr(c.SDL_RenderSetClipRect(self.renderer, &c.SDL_Rect{
-            .x = 0,
-            .y = 0,
-            .w = @trunc(size.w),
-            .h = @trunc(size.h),
-        }), "SDL_SetRenderClipRect in begin");
+    if (self.renderer) |renderer| {
+        if (sdl3) {
+            try toErr(c.SDL_SetRenderClipRect(renderer, &c.SDL_Rect{
+                .x = 0,
+                .y = 0,
+                .w = @trunc(size.w),
+                .h = @trunc(size.h),
+            }), "SDL_SetRenderClipRect in begin");
+        } else {
+            try toErr(c.SDL_RenderSetClipRect(renderer, &c.SDL_Rect{
+                .x = 0,
+                .y = 0,
+                .w = @trunc(size.w),
+                .h = @trunc(size.h),
+            }), "SDL_SetRenderClipRect in begin");
+        }
     }
     self.manage_backend_tracking.reset_begin();
 }
 
 pub fn clearWindow(self: *SDLBackend) !void {
-    try toErr(SDLBackend.c.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 0), "SDL_SetRenderDrawColor in clearScreen");
-    try toErr(SDLBackend.c.SDL_RenderClear(self.renderer), "SDL_RenderClear in clearScreen");
+    const renderer = self.renderer orelse return;
+    try toErr(SDLBackend.c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0), "SDL_SetRenderDrawColor in clearScreen");
+    try toErr(SDLBackend.c.SDL_RenderClear(renderer), "SDL_RenderClear in clearScreen");
 }
 
 pub fn end(_: *SDLBackend) !void {}
@@ -956,16 +1048,26 @@ pub fn end(_: *SDLBackend) !void {}
 pub fn pixelSize(self: *SDLBackend) dvui.Size.Physical {
     var w: i32 = undefined;
     var h: i32 = undefined;
-    if (sdl3) {
+    if (self.renderer) |renderer| {
+        if (sdl3) {
+            toErr(
+                c.SDL_GetCurrentRenderOutputSize(renderer, &w, &h),
+                "SDL_GetCurrentRenderOutputSize in pixelSize",
+            ) catch return self.last_pixel_size;
+        } else {
+            toErr(
+                c.SDL_GetRendererOutputSize(renderer, &w, &h),
+                "SDL_GetRendererOutputSize in pixelSize",
+            ) catch return self.last_pixel_size;
+        }
+    } else if (sdl3) {
+        // Only reachable with a Vulkan-flagged (rendererless) window, which is sdl3-only.
         toErr(
-            c.SDL_GetCurrentRenderOutputSize(self.renderer, &w, &h),
-            "SDL_GetCurrentRenderOutputSize in pixelSize",
+            c.SDL_GetWindowSizeInPixels(self.window, &w, &h),
+            "SDL_GetWindowSizeInPixels in pixelSize",
         ) catch return self.last_pixel_size;
     } else {
-        toErr(
-            c.SDL_GetRendererOutputSize(self.renderer, &w, &h),
-            "SDL_GetRendererOutputSize in pixelSize",
-        ) catch return self.last_pixel_size;
+        return self.last_pixel_size;
     }
     self.last_pixel_size = .{ .w = @as(f32, @floatFromInt(w)), .h = @as(f32, @floatFromInt(h)) };
     return self.last_pixel_size;
@@ -1011,11 +1113,11 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
     if (maybe_clipr) |clipr| {
         if (sdl3) {
             try toErr(
-                c.SDL_GetRenderClipRect(self.renderer, &oldclip),
+                c.SDL_GetRenderClipRect(self.renderer.?, &oldclip),
                 "SDL_GetRenderClipRect in drawClippedTriangles",
             );
         } else {
-            c.SDL_RenderGetClipRect(self.renderer, &oldclip);
+            c.SDL_RenderGetClipRect(self.renderer.?, &oldclip);
         }
 
         const clip = c.SDL_Rect{
@@ -1026,12 +1128,12 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
         };
         if (sdl3) {
             try toErr(
-                c.SDL_SetRenderClipRect(self.renderer, &clip),
+                c.SDL_SetRenderClipRect(self.renderer.?, &clip),
                 "SDL_SetRenderClipRect in drawClippedTriangles",
             );
         } else {
             try toErr(
-                c.SDL_RenderSetClipRect(self.renderer, &clip),
+                c.SDL_RenderSetClipRect(self.renderer.?, &clip),
                 "SDL_RenderSetClipRect in drawClippedTriangles",
             );
         }
@@ -1042,7 +1144,7 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
         tex = @ptrCast(@alignCast(t.ptr));
         if (sdl3) {
             _ = c.SDL_SetRenderTextureAddressMode(
-                self.renderer,
+                self.renderer.?,
                 if (t.wrap_u == .clamp) c.SDL_TEXTURE_ADDRESS_CLAMP else c.SDL_TEXTURE_ADDRESS_WRAP,
                 if (t.wrap_v == .clamp) c.SDL_TEXTURE_ADDRESS_CLAMP else c.SDL_TEXTURE_ADDRESS_WRAP,
             );
@@ -1062,7 +1164,7 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
         }
 
         try toErr(c.SDL_RenderGeometryRaw(
-            self.renderer,
+            self.renderer.?,
             tex,
             @as(*const f32, @ptrCast(&vtx[0].pos)),
             @sizeOf(dvui.Vertex),
@@ -1094,7 +1196,7 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
         }
 
         try toErr(c.SDL_RenderGeometryRaw(
-            self.renderer,
+            self.renderer.?,
             tex,
             @as(*const f32, @ptrCast(&vtx[0].pos)),
             @sizeOf(dvui.Vertex),
@@ -1112,12 +1214,12 @@ pub fn drawClippedTriangles(self: *SDLBackend, texture: ?dvui.Texture, vtx: []co
     if (maybe_clipr) |_| {
         if (sdl3) {
             try toErr(
-                c.SDL_SetRenderClipRect(self.renderer, &oldclip),
+                c.SDL_SetRenderClipRect(self.renderer.?, &oldclip),
                 "SDL_SetRenderClipRect in drawClippedTriangles reset clip",
             );
         } else {
             try toErr(
-                c.SDL_RenderSetClipRect(self.renderer, &oldclip),
+                c.SDL_RenderSetClipRect(self.renderer.?, &oldclip),
                 "SDL_RenderSetClipRect in drawClippedTriangles reset clip",
             );
         }
@@ -1185,7 +1287,7 @@ pub fn textureCreate(self: *SDLBackend, pixels: [*]const u8, options: dvui.Textu
 
     defer if (sdl3) c.SDL_DestroySurface(surface) else c.SDL_FreeSurface(surface);
 
-    const texture = c.SDL_CreateTextureFromSurface(self.renderer, surface) orelse return logErr("SDL_CreateTextureFromSurface in textureCreate");
+    const texture = c.SDL_CreateTextureFromSurface(self.renderer.?, surface) orelse return logErr("SDL_CreateTextureFromSurface in textureCreate");
     errdefer c.SDL_DestroyTexture(texture);
 
     if (sdl3) try toErr(switch (options.interpolation) {
@@ -1232,7 +1334,7 @@ pub fn textureCreateTarget(self: *SDLBackend, options: dvui.Texture.CreateOption
     };
 
     const texture = c.SDL_CreateTexture(
-        self.renderer,
+        self.renderer.?,
         if (comptime sdl3) @as(c.SDL_PixelFormat, @intCast(sdl_format)) else sdl_format,
         c.SDL_TEXTUREACCESS_TARGET,
         @intCast(options.width),
@@ -1259,30 +1361,30 @@ pub fn textureCreateTarget(self: *SDLBackend, options: dvui.Texture.CreateOption
 
 pub fn textureClearTarget(self: *SDLBackend, texture: dvui.TextureTarget) void {
     // null is the default render target
-    const old = c.SDL_GetRenderTarget(self.renderer);
-    defer _ = c.SDL_SetRenderTarget(self.renderer, old);
+    const old = c.SDL_GetRenderTarget(self.renderer.?);
+    defer _ = c.SDL_SetRenderTarget(self.renderer.?, old);
 
     var oldBlend: c_uint = undefined;
-    _ = c.SDL_GetRenderDrawBlendMode(self.renderer, &oldBlend);
-    defer _ = c.SDL_SetRenderDrawBlendMode(self.renderer, oldBlend);
+    _ = c.SDL_GetRenderDrawBlendMode(self.renderer.?, &oldBlend);
+    defer _ = c.SDL_SetRenderDrawBlendMode(self.renderer.?, oldBlend);
 
     toErr(
-        c.SDL_SetRenderTarget(self.renderer, @ptrCast(@alignCast(texture.ptr))),
+        c.SDL_SetRenderTarget(self.renderer.?, @ptrCast(@alignCast(texture.ptr))),
         "SDL_SetRenderTarget in textureClearTarget",
     ) catch return;
 
     toErr(
-        c.SDL_SetRenderDrawBlendMode(self.renderer, c.SDL_BLENDMODE_NONE),
+        c.SDL_SetRenderDrawBlendMode(self.renderer.?, c.SDL_BLENDMODE_NONE),
         "SDL_SetRenderDrawBlendMode in textureClearTarget",
     ) catch return;
 
     toErr(
-        c.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 0),
+        c.SDL_SetRenderDrawColor(self.renderer.?, 0, 0, 0, 0),
         "SDL_SetRenderDrawColor in textureClearTarget",
     ) catch return;
 
     toErr(
-        c.SDL_RenderFillRect(self.renderer, null),
+        c.SDL_RenderFillRect(self.renderer.?, null),
         "SDL_RenderFillRect in textureClearTarget",
     ) catch return;
 }
@@ -1290,14 +1392,14 @@ pub fn textureClearTarget(self: *SDLBackend, texture: dvui.TextureTarget) void {
 pub fn textureReadTarget(self: *SDLBackend, texture: dvui.TextureTarget, pixels_out: [*]u8) !void {
     if (sdl3) {
         // null is the default target
-        const orig_target = c.SDL_GetRenderTarget(self.renderer);
-        try toErr(c.SDL_SetRenderTarget(self.renderer, @ptrCast(@alignCast(texture.ptr))), "SDL_SetRenderTarget in textureReadTarget");
+        const orig_target = c.SDL_GetRenderTarget(self.renderer.?);
+        try toErr(c.SDL_SetRenderTarget(self.renderer.?, @ptrCast(@alignCast(texture.ptr))), "SDL_SetRenderTarget in textureReadTarget");
         defer toErr(
-            c.SDL_SetRenderTarget(self.renderer, orig_target),
+            c.SDL_SetRenderTarget(self.renderer.?, orig_target),
             "SDL_SetRenderTarget in textureReadTarget",
         ) catch log.err("Could not reset render target", .{});
 
-        var surface: *c.SDL_Surface = c.SDL_RenderReadPixels(self.renderer, null) orelse
+        var surface: *c.SDL_Surface = c.SDL_RenderReadPixels(self.renderer.?, null) orelse
             logErr("SDL_RenderReadPixels in textureReadTarget") catch
             return dvui.Backend.TextureError.TextureRead;
         defer c.SDL_DestroySurface(surface);
@@ -1325,7 +1427,7 @@ pub fn textureReadTarget(self: *SDLBackend, texture: dvui.TextureTarget, pixels_
     // crashes if we ask it to do the conversion for us.
     var swap_rb = true;
     var info: c.SDL_RendererInfo = undefined;
-    try toErr(c.SDL_GetRendererInfo(self.renderer, &info), "SDL_GetRendererInfo in textureReadTarget");
+    try toErr(c.SDL_GetRendererInfo(self.renderer.?, &info), "SDL_GetRendererInfo in textureReadTarget");
     //std.debug.print("renderer name {s} formats:\n", .{info.name});
     for (0..info.num_texture_formats) |i| {
         //std.debug.print("  {s}\n", .{c.SDL_GetPixelFormatName(info.texture_formats[i])});
@@ -1334,16 +1436,16 @@ pub fn textureReadTarget(self: *SDLBackend, texture: dvui.TextureTarget, pixels_
         }
     }
 
-    const orig_target = c.SDL_GetRenderTarget(self.renderer);
-    try toErr(c.SDL_SetRenderTarget(self.renderer, @ptrCast(texture.ptr)), "SDL_SetRenderTarget in textureReadTarget");
+    const orig_target = c.SDL_GetRenderTarget(self.renderer.?);
+    try toErr(c.SDL_SetRenderTarget(self.renderer.?, @ptrCast(texture.ptr)), "SDL_SetRenderTarget in textureReadTarget");
     defer toErr(
-        c.SDL_SetRenderTarget(self.renderer, orig_target),
+        c.SDL_SetRenderTarget(self.renderer.?, orig_target),
         "SDL_SetRenderTarget in textureReadTarget",
     ) catch log.err("Could not reset render target", .{});
 
     toErr(
         c.SDL_RenderReadPixels(
-            self.renderer,
+            self.renderer.?,
             null,
             if (swap_rb) c.SDL_PIXELFORMAT_ARGB8888 else c.SDL_PIXELFORMAT_ABGR8888,
             pixels_out,
@@ -1383,18 +1485,18 @@ pub fn textureFromTargetTemp(_: *SDLBackend, target: dvui.TextureTarget) !dvui.T
 
 pub fn renderTarget(self: *SDLBackend, texture: ?dvui.TextureTarget) !void {
     const ptr: ?*anyopaque = if (texture) |tex| tex.ptr else null;
-    try toErr(c.SDL_SetRenderTarget(self.renderer, @ptrCast(@alignCast(ptr))), "SDL_SetRenderTarget in renderTarget");
+    try toErr(c.SDL_SetRenderTarget(self.renderer.?, @ptrCast(@alignCast(ptr))), "SDL_SetRenderTarget in renderTarget");
 
     // by default sdl sets an empty clip, let's ensure it is the full texture/screen
     if (sdl3) {
         // sdl3 crashes if w/h are too big, this seems to work
         try toErr(
-            c.SDL_SetRenderClipRect(self.renderer, &c.SDL_Rect{ .x = 0, .y = 0, .w = 65536, .h = 65536 }),
+            c.SDL_SetRenderClipRect(self.renderer.?, &c.SDL_Rect{ .x = 0, .y = 0, .w = 65536, .h = 65536 }),
             "SDL_SetRenderClipRect in renderTarget",
         );
     } else {
         try toErr(
-            c.SDL_RenderSetClipRect(self.renderer, &c.SDL_Rect{ .x = 0, .y = 0, .w = std.math.maxInt(c_int), .h = std.math.maxInt(c_int) }),
+            c.SDL_RenderSetClipRect(self.renderer.?, &c.SDL_Rect{ .x = 0, .y = 0, .w = std.math.maxInt(c_int), .h = std.math.maxInt(c_int) }),
             "SDL_RenderSetClipRect in renderTarget",
         );
     }

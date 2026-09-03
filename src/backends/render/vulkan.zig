@@ -1,13 +1,19 @@
-//! Vulkan renderer and presentation bridge for the wio platform backend.
+//! Vulkan renderer and presentation bridge, usable by any windowing backend.
 //!
 //! This backend owns the Vulkan instance, device, surface, and swapchain. It
 //! uses Vulkan 1.2 and classic render passes by default, with optional Vulkan
 //! 1.3 dynamic rendering.
+//!
+//! `init` takes a `window` argument whose type must provide:
+//!   pub fn vkGetRequiredInstanceExtensions() []const [*:0]const u8
+//!   pub fn vkGetInstanceProcAddr(instance: usize, name: [*:0]const u8) ?*const anyopaque
+//!   pub fn vkCreateSurface(self: @This(), instance: usize, vk_alloc: ?*const anyopaque, surface: *u64) anyerror!void
+//! The first two are looked up as static declarations on the pointee type of
+//! `window`; the third is called as a method on `window` itself.
 
 const std = @import("std");
 const dvui = @import("dvui");
 const vk = @import("vk");
-const wio = @import("wio");
 const Renderer = @import("vulkan/renderer.zig");
 const log = std.log.scoped(.dvui_vulkan);
 
@@ -164,7 +170,6 @@ fn submitReadbackAndWait(userdata: ?*anyopaque, command_buffer: vk.CommandBuffer
 }
 
 allocator: std.mem.Allocator,
-window: *wio.Window,
 vk_alloc: ?*vk.AllocationCallbacks,
 instance_wrapper: *vk.InstanceWrapper,
 instance: vk.InstanceProxy,
@@ -210,7 +215,7 @@ current_image: u32 = 0,
 current_slot: usize = 0,
 readback_submit_context: ?*ReadbackSubmitContext = null,
 
-pub fn init(allocator: std.mem.Allocator, window: *wio.Window, options: InitOptions) !@This() {
+pub fn init(allocator: std.mem.Allocator, window: anytype, options: InitOptions) !@This() {
     const owned = blk: {
         var resources = try initVulkanResources(allocator, window, options);
         errdefer resources.deinit(allocator, options.vk_alloc);
@@ -221,7 +226,6 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window, options: InitOpti
 
     var self: @This() = .{
         .allocator = allocator,
-        .window = window,
         .vk_alloc = options.vk_alloc,
         .instance_wrapper = resources.instance_wrapper,
         .instance = resources.instance,
@@ -927,9 +931,10 @@ fn destroyDepthResources(self: *@This()) void {
     self.depth_layouts = &.{};
 }
 
-fn initVulkanResources(allocator: std.mem.Allocator, window: *wio.Window, options: InitOptions) !VulkanResources {
+fn initVulkanResources(allocator: std.mem.Allocator, window: anytype, options: InitOptions) !VulkanResources {
+    const Window = std.meta.Child(@TypeOf(window));
     const vk_alloc = options.vk_alloc;
-    const base = vk.BaseWrapper.load(getInstanceProcAddr);
+    const base = vk.BaseWrapper.load(getInstanceProcAddr(Window));
     if (options.api_version.toU32() < vk.API_VERSION_1_2.toU32()) return error.UnsupportedApiVersion;
     if (options.rendering == .dynamic and options.api_version.toU32() < vk.API_VERSION_1_3.toU32()) return error.DynamicRenderingRequiresVulkan13;
     if (options.rendering == .dynamic and pNextContains(options.device_features_p_next, .physical_device_dynamic_rendering_features))
@@ -942,17 +947,17 @@ fn initVulkanResources(allocator: std.mem.Allocator, window: *wio.Window, option
     const instance_wrapper = try allocator.create(vk.InstanceWrapper);
     errdefer allocator.destroy(instance_wrapper);
 
-    const wio_extensions = wio.getRequiredVulkanInstanceExtensions();
+    const window_extensions = Window.vkGetRequiredInstanceExtensions();
     const available_extensions = try base.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
     defer allocator.free(available_extensions);
     const portability_enumeration = hasExtension(available_extensions, vk.extensions.khr_portability_enumeration.name);
     const extension_storage = try allocator.alloc(
         [*:0]const u8,
-        wio_extensions.len + options.instance_extensions.len + @intFromBool(portability_enumeration),
+        window_extensions.len + options.instance_extensions.len + @intFromBool(portability_enumeration),
     );
     defer allocator.free(extension_storage);
     var extension_count: usize = 0;
-    appendUniqueExtensions(extension_storage, &extension_count, wio_extensions);
+    appendUniqueExtensions(extension_storage, &extension_count, window_extensions);
     appendUniqueExtensions(extension_storage, &extension_count, options.instance_extensions);
     if (portability_enumeration) appendUniqueExtensions(
         extension_storage,
@@ -976,7 +981,7 @@ fn initVulkanResources(allocator: std.mem.Allocator, window: *wio.Window, option
         .enabled_extension_count = @intCast(extensions.len),
         .pp_enabled_extension_names = extensions.ptr,
     }, vk_alloc);
-    instance_wrapper.* = vk.InstanceWrapper.load(instance_handle, getInstanceProcAddr);
+    instance_wrapper.* = vk.InstanceWrapper.load(instance_handle, getInstanceProcAddr(Window));
     const instance = vk.InstanceProxy.init(instance_handle, instance_wrapper);
     errdefer instance.destroyInstance(vk_alloc);
 
@@ -1392,8 +1397,12 @@ fn sizeToExtent(size: dvui.Size.Physical) vk.Extent2D {
     };
 }
 
-fn getInstanceProcAddr(instance: vk.Instance, name: [*:0]const u8) callconv(vk.vulkan_call_conv) vk.PfnVoidFunction {
-    return @ptrCast(wio.vkGetInstanceProcAddr(@intFromEnum(instance), name));
+fn getInstanceProcAddr(comptime Window: type) fn (vk.Instance, [*:0]const u8) callconv(vk.vulkan_call_conv) vk.PfnVoidFunction {
+    return struct {
+        fn f(instance: vk.Instance, name: [*:0]const u8) callconv(vk.vulkan_call_conv) vk.PfnVoidFunction {
+            return @ptrCast(Window.vkGetInstanceProcAddr(@intFromEnum(instance), name));
+        }
+    }.f;
 }
 
 fn mapGenericError(err: anyerror) dvui.Backend.GenericError {

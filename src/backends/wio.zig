@@ -5,6 +5,24 @@ pub const wio = @import("wio");
 
 pub const kind: dvui.enums.Backend = .wio;
 
+/// Adapts a `wio.Window` to the window-adapter contract required by
+/// `dvui.render_backend.init` when the Vulkan renderer is in use.
+pub const VulkanWindow = struct {
+    window: *wio.Window,
+
+    pub fn vkGetRequiredInstanceExtensions() []const [*:0]const u8 {
+        return wio.getRequiredVulkanInstanceExtensions();
+    }
+
+    pub fn vkGetInstanceProcAddr(instance: usize, name: [*:0]const u8) ?*const anyopaque {
+        return @ptrCast(wio.vkGetInstanceProcAddr(instance, name));
+    }
+
+    pub fn vkCreateSurface(self: @This(), instance: usize, vk_alloc: ?*const anyopaque, surface: *u64) !void {
+        try self.window.vkCreateSurface(instance, vk_alloc, surface);
+    }
+};
+
 io: std.Io,
 window: wio.Window,
 size_natural: dvui.Size.Natural,
@@ -303,7 +321,7 @@ pub fn main(main_init: std.process.Init) !void {
             if (config.vsync) window.glSwapInterval(1);
             break :blk try dvui.render_backend.init(gpa, wio.glGetProcAddress, "150");
         },
-        .vulkan => try dvui.render_backend.init(gpa, &window, .{
+        .vulkan => try dvui.render_backend.init(gpa, &VulkanWindow{ .window = &window }, .{
             .size_physical = .{ .w = config.size.w, .h = config.size.h },
             .vsync = config.vsync,
         }),
