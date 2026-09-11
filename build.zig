@@ -776,16 +776,28 @@ pub fn buildBackend(
                     .backend_name = "sdl-backend",
                     .backend_mod = sdl_mod,
                 };
-                if (dvui_opts.render_backend == .vulkan) {
-                    // These examples use the SDL_Renderer-owning constructors and
-                    // the single-arg `backend()`, which aren't compatible with an
-                    // external (Vulkan) render backend.
-                    _ = addExample("sdl3-vulkan-standalone", b.path("examples/sdl-vulkan-standalone.zig"), true, example_opts, dvui_opts);
-                    _ = addExample("sdl3-vulkan-ontop", b.path("examples/sdl-vulkan-ontop.zig"), true, example_opts, dvui_opts);
-                } else {
-                    _ = addExample("sdl3-standalone", b.path("examples/sdl-standalone.zig"), true, example_opts, dvui_opts);
-                    _ = addExample("sdl3-ontop", b.path("examples/sdl-ontop.zig"), true, example_opts, dvui_opts);
-                    _ = addExample("sdl3-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
+                // sdl3-standalone/sdl3-ontop use the SDL_Renderer-owning constructors
+                // and the single-arg `backend()` for the default renderer, or the
+                // Vulkan-specific constructors/`backendWithRenderer` when
+                // -Drenderer=vulkan is passed; the target name stays the same either
+                // way, only the backing source file changes.
+                const standalone_src = if (dvui_opts.render_backend == .vulkan)
+                    b.path("examples/sdl-vulkan-standalone.zig")
+                else
+                    b.path("examples/sdl-standalone.zig");
+                _ = addExample("sdl3-standalone", standalone_src, true, example_opts, dvui_opts);
+
+                const ontop_src = if (dvui_opts.render_backend == .vulkan)
+                    b.path("examples/sdl-vulkan-ontop.zig")
+                else
+                    b.path("examples/sdl-ontop.zig");
+                _ = addExample("sdl3-ontop", ontop_src, true, example_opts, dvui_opts);
+
+                // examples/app.zig is backend-agnostic; sdl.zig's own main()/callback
+                // path branches on dvui.render_backend.kind to support Vulkan.
+                _ = addExample("sdl3-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
+
+                if (dvui_opts.render_backend != .vulkan) {
                     _ = addExample("sdl3-multi-win", b.path("examples/sdl-multi-win.zig"), true, example_opts, dvui_opts);
                     _ = addExample("sdl3-docking", b.path("examples/docking-standalone.zig"), true, example_opts, dvui_opts);
                 }

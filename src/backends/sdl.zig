@@ -947,7 +947,17 @@ pub fn renderPresent(self: *SDLBackend) void {
     self.manage_backend_tracking.check(.renderPresent);
 }
 
-pub fn backend(self: *SDLBackend) dvui.Backend {
+/// Only exists when `-Drenderer` selects the default render backend (i.e.
+/// this SDLBackend owns an `SDL_Renderer`). Use `backendWithRenderer` for a
+/// non-default `-Drenderer` such as Vulkan.
+///
+/// A conditional `const` (rather than an `if` inside a normal `fn`) so a
+/// non-default build never semantically analyzes `backendDefault`'s body,
+/// which calls the single-arg `dvui.Backend.init` (invalid for a non-default
+/// renderer) — matching the `Backend.init`/`initDefault`/`initRenderer`
+/// pattern in `src/Backend.zig`.
+pub const backend = if (dvui.render_backend.kind == .default) backendDefault else {};
+fn backendDefault(self: *SDLBackend) dvui.Backend {
     return dvui.Backend.init(self);
 }
 
@@ -2249,23 +2259,46 @@ pub fn main(main_init: std.process.Init) !u8 {
 
     const init_opts = app.config.get();
 
-    // init SDL backend (creates and owns OS window)
-    var back = try initWindow(.{
-        .io = init_opts.io orelse main_init.io,
-        .environ_map = main_init.environ_map,
-        .size = init_opts.size,
-        .min_size = init_opts.min_size,
-        .max_size = init_opts.max_size,
-        .vsync = init_opts.vsync,
-        .title = init_opts.title,
-        .org = init_opts.org,
-        .icon = init_opts.icon,
-        .hidden = init_opts.hidden,
-        .transparent = init_opts.transparent,
-        .persist_window_geometry = init_opts.persist_window_geometry,
-        .pref_path = init_opts.pref_path,
-    });
+    var back: SDLBackend = undefined;
+    var renderer: if (dvui.render_backend.kind == .default) void else dvui.render_backend = undefined;
+    const backend_iface: dvui.Backend = blk: {
+        if (dvui.render_backend.kind == .default) {
+            // init SDL backend (creates and owns OS window)
+            back = try initWindow(.{
+                .io = init_opts.io orelse main_init.io,
+                .environ_map = main_init.environ_map,
+                .size = init_opts.size,
+                .min_size = init_opts.min_size,
+                .max_size = init_opts.max_size,
+                .vsync = init_opts.vsync,
+                .title = init_opts.title,
+                .org = init_opts.org,
+                .icon = init_opts.icon,
+                .hidden = init_opts.hidden,
+                .transparent = init_opts.transparent,
+                .persist_window_geometry = init_opts.persist_window_geometry,
+                .pref_path = init_opts.pref_path,
+            });
+            break :blk back.backend();
+        } else {
+            // TODO: icon/hidden/transparent/persist_window_geometry/pref_path/org
+            // aren't wired through to the Vulkan window path yet.
+            back = try initVulkanWindow(.{
+                .io = init_opts.io orelse main_init.io,
+                .title = init_opts.title,
+                .size = init_opts.size,
+                .min_size = init_opts.min_size,
+                .max_size = init_opts.max_size,
+            });
+            renderer = try dvui.render_backend.init(main_init.gpa, &VulkanWindow{ .window = back.window }, .{
+                .size_physical = .{ .w = init_opts.size.w, .h = init_opts.size.h },
+                .vsync = init_opts.vsync,
+            });
+            break :blk back.backendWithRenderer(&renderer);
+        }
+    };
     defer back.deinit();
+    defer if (dvui.render_backend.kind != .default) renderer.deinit();
 
     if (sdl3) {
         toErr(c.SDL_EnableScreenSaver(), "SDL_EnableScreenSaver in sdl main") catch {};
@@ -2274,7 +2307,7 @@ pub fn main(main_init: std.process.Init) !u8 {
     }
 
     //// init dvui Window (maps onto a single OS window)
-    var win = try dvui.Window.init(@src(), main_init.gpa, back.backend(), init_opts.window_init_options);
+    var win = try dvui.Window.init(@src(), main_init.gpa, backend_iface, init_opts.window_init_options);
     defer win.deinit();
 
     if (init_opts.window_init_options.open_flag != null)
@@ -2318,6 +2351,10 @@ pub fn main(main_init: std.process.Init) !u8 {
 const CallbackState = struct {
     win: dvui.Window,
     back: SDLBackend,
+    /// Only present when dvui.render_backend.kind != .default (e.g. Vulkan).
+    /// Must live here (not as a local in appInit) since dvui.Backend keeps a
+    /// pointer to it for the whole app lifetime.
+    renderer: if (dvui.render_backend.kind == .default) void else dvui.render_backend = undefined,
     gpa: std.mem.Allocator,
     io: std.Io,
     window_open: bool = true,
@@ -2347,24 +2384,46 @@ fn appInit(appstate: ?*?*anyopaque, argc: c_int, argv: ?[*:null]?[*:0]u8) callco
 
     const init_opts = app.config.get();
 
-    // init SDL backend (creates and owns OS window)
-    appState.back = initWindow(.{
-        .io = appState.io,
-        .size = init_opts.size,
-        .min_size = init_opts.min_size,
-        .max_size = init_opts.max_size,
-        .vsync = init_opts.vsync,
-        .title = init_opts.title,
-        .org = init_opts.org,
-        .icon = init_opts.icon,
-        .hidden = init_opts.hidden,
-        .transparent = init_opts.transparent,
-        .persist_window_geometry = init_opts.persist_window_geometry,
-        .pref_path = init_opts.pref_path,
-    }) catch |err| {
-        log.err("initWindow failed: {any}", .{err});
-        return c.SDL_APP_FAILURE;
-    };
+    if (dvui.render_backend.kind == .default) {
+        // init SDL backend (creates and owns OS window)
+        appState.back = initWindow(.{
+            .io = appState.io,
+            .size = init_opts.size,
+            .min_size = init_opts.min_size,
+            .max_size = init_opts.max_size,
+            .vsync = init_opts.vsync,
+            .title = init_opts.title,
+            .org = init_opts.org,
+            .icon = init_opts.icon,
+            .hidden = init_opts.hidden,
+            .transparent = init_opts.transparent,
+            .persist_window_geometry = init_opts.persist_window_geometry,
+            .pref_path = init_opts.pref_path,
+        }) catch |err| {
+            log.err("initWindow failed: {any}", .{err});
+            return c.SDL_APP_FAILURE;
+        };
+    } else {
+        // TODO: icon/hidden/transparent/persist_window_geometry/pref_path/org
+        // aren't wired through to the Vulkan window path yet.
+        appState.back = initVulkanWindow(.{
+            .io = appState.io,
+            .title = init_opts.title,
+            .size = init_opts.size,
+            .min_size = init_opts.min_size,
+            .max_size = init_opts.max_size,
+        }) catch |err| {
+            log.err("initVulkanWindow failed: {any}", .{err});
+            return c.SDL_APP_FAILURE;
+        };
+        appState.renderer = dvui.render_backend.init(appState.gpa, &VulkanWindow{ .window = appState.back.window }, .{
+            .size_physical = .{ .w = init_opts.size.w, .h = init_opts.size.h },
+            .vsync = init_opts.vsync,
+        }) catch |err| {
+            log.err("dvui.render_backend.init failed: {any}", .{err});
+            return c.SDL_APP_FAILURE;
+        };
+    }
 
     if (sdl3) {
         toErr(c.SDL_EnableScreenSaver(), "SDL_EnableScreenSaver in sdl main") catch {};
@@ -2373,7 +2432,11 @@ fn appInit(appstate: ?*?*anyopaque, argc: c_int, argv: ?[*:null]?[*:0]u8) callco
     }
 
     //// init dvui Window (maps onto a single OS window)
-    appState.win = dvui.Window.init(@src(), appState.gpa, appState.back.backend(), init_opts.window_init_options) catch |err| {
+    const backend_iface: dvui.Backend = if (dvui.render_backend.kind == .default)
+        appState.back.backend()
+    else
+        appState.back.backendWithRenderer(&appState.renderer);
+    appState.win = dvui.Window.init(@src(), appState.gpa, backend_iface, init_opts.window_init_options) catch |err| {
         log.err("dvui.Window.init failed: {any}", .{err});
         return c.SDL_APP_FAILURE;
     };
@@ -2410,6 +2473,7 @@ fn appQuit(_: ?*anyopaque, result: c.SDL_AppResult) callconv(.c) void {
     const app = dvui.App.get() orelse unreachable;
     if (app.deinitFn) |deinitFn| deinitFn(&appState.win);
     appState.win.deinit();
+    if (dvui.render_backend.kind != .default) appState.renderer.deinit();
     appState.back.deinit();
 
     // SDL will clean up the window/renderer for us.

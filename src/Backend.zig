@@ -279,7 +279,11 @@ pub fn windowStateSet(self: Backend, window: *dvui.Window, state: dvui.enums.Win
 
 // We need a comptime support flag per Backend, and the argument type is not obvious at call site so
 // check expectation while we are at it.
-pub const support_child_os_wins = if (@hasDecl(Implementation, "initWindowSecondary"))
+// Secondary OS windows use the backend's single-arg `.backend()` path
+// (`initWindowSecondary` + `new_backend.backend()` in OsWindowWidget.zig), which
+// isn't compatible with an external render backend like Vulkan, so require the
+// default renderer here too.
+pub const support_child_os_wins = if (@hasDecl(Implementation, "initWindowSecondary") and dvui.render_backend.kind == .default)
     if (initWindowSecondarySignatureCheck())
         true
     else
